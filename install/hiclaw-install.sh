@@ -418,6 +418,15 @@ msg() {
         "install.wait_ready.waiting.en") text="Waiting... (%ds/%ds)" ;;
         "install.wait_ready.timeout.zh") text="Manager Agent 在 %ss 内未就绪。请检查: docker logs %s" ;;
         "install.wait_ready.timeout.en") text="Manager agent did not become ready within %ss. Check: docker logs %s" ;;
+        # --- Wait for Matrix ready ---
+        "install.wait_matrix.zh") text="等待 Matrix 服务就绪（超时: %ss）..." ;;
+        "install.wait_matrix.en") text="Waiting for Matrix server to be ready (timeout: %ss)..." ;;
+        "install.wait_matrix.ok.zh") text="Matrix 服务已就绪！" ;;
+        "install.wait_matrix.ok.en") text="Matrix server is ready!" ;;
+        "install.wait_matrix.waiting.zh") text="等待 Matrix 中... (%ds/%ds)" ;;
+        "install.wait_matrix.waiting.en") text="Waiting for Matrix... (%ds/%ds)" ;;
+        "install.wait_matrix.timeout.zh") text="Matrix 服务在 %ss 内未就绪。请检查: docker logs %s" ;;
+        "install.wait_matrix.timeout.en") text="Matrix server did not become ready within %ss. Check: docker logs %s" ;;
         # --- OpenAI-compatible provider creation ---
         "install.openai_compat.missing.zh") text="警告: OpenAI Base URL 或 API Key 未设置，跳过提供商创建" ;;
         "install.openai_compat.missing.en") text="WARNING: OpenAI Base URL or API Key not set, skipping provider creation" ;;
@@ -630,6 +639,27 @@ wait_manager_ready() {
 
     echo ""
     error "$(msg install.wait_ready.timeout "${timeout}" "${container}")"
+}
+
+wait_matrix_ready() {
+    local timeout="${HICLAW_READY_TIMEOUT:-300}"
+    local elapsed=0
+    local container="${1:-hiclaw-manager}"
+
+    log "$(msg install.wait_matrix "${timeout}")"
+
+    while [ "${elapsed}" -lt "${timeout}" ]; do
+        if ${DOCKER_CMD} exec "${container}" curl -sf http://127.0.0.1:6167/_tuwunel/server_version >/dev/null 2>&1; then
+            log "$(msg install.wait_matrix.ok)"
+            return 0
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+        printf "\r\033[36m[HiClaw]\033[0m $(msg install.wait_matrix.waiting "${elapsed}" "${timeout}")"
+    done
+
+    echo ""
+    error "$(msg install.wait_matrix.timeout "${timeout}" "${container}")"
 }
 
 # ============================================================
@@ -1538,6 +1568,9 @@ EOF
 
     # Wait for Manager agent to be ready
     wait_manager_ready "hiclaw-manager"
+
+    # Wait for Matrix server to be ready
+    wait_matrix_ready "hiclaw-manager"
 
     # Send welcome message to Manager (skipped automatically if soul-configured marker exists)
     send_welcome_message

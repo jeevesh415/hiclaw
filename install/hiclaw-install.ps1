@@ -330,6 +330,12 @@ $script:Messages = @{
     "install.wait_ready.waiting" = @{ zh = "等待中... ({0}s/{1}s)"; en = "Waiting... ({0}s/{1}s)" }
     "install.wait_ready.timeout" = @{ zh = "Manager Agent 在 {0}s 内未就绪。请检查: docker logs {1}"; en = "Manager agent did not become ready within {0}s. Check: docker logs {1}" }
 
+    # --- Wait for Matrix ready ---
+    "install.wait_matrix" = @{ zh = "等待 Matrix 服务就绪（超时: {0}s）..."; en = "Waiting for Matrix server to be ready (timeout: {0}s)..." }
+    "install.wait_matrix.ok" = @{ zh = "Matrix 服务已就绪！"; en = "Matrix server is ready!" }
+    "install.wait_matrix.waiting" = @{ zh = "等待 Matrix 中... ({0}s/{1}s)"; en = "Waiting for Matrix... ({0}s/{1}s)" }
+    "install.wait_matrix.timeout" = @{ zh = "Matrix 服务在 {0}s 内未就绪。请检查: docker logs {1}"; en = "Matrix server did not become ready within {0}s. Check: docker logs {1}" }
+
     # --- OpenAI-compatible provider creation ---
     "install.openai_compat.missing" = @{ zh = "警告: OpenAI Base URL 或 API Key 未设置，跳过提供商创建"; en = "WARNING: OpenAI Base URL or API Key not set, skipping provider creation" }
     "install.openai_compat.creating" = @{ zh = "正在创建 OpenAI 兼容提供商..."; en = "Creating OpenAI-compatible provider..." }
@@ -525,6 +531,35 @@ function Wait-ManagerReady {
 
     Write-Host ""
     Write-Error (Get-Msg "install.wait_ready.timeout" -f $Timeout, $Container)
+}
+
+function Wait-MatrixReady {
+    param(
+        [string]$Container = "hiclaw-manager",
+        [int]$Timeout = 300
+    )
+
+    $elapsed = 0
+    Write-Log (Get-Msg "install.wait_matrix" -f $Timeout)
+
+    while ($elapsed -lt $Timeout) {
+        try {
+            $result = docker exec $Container curl -sf http://127.0.0.1:6167/_tuwunel/server_version 2>$null
+            if ($result) {
+                Write-Log (Get-Msg "install.wait_matrix.ok")
+                return $true
+            }
+        } catch {
+            # Ignore errors during polling
+        }
+
+        Start-Sleep -Seconds 5
+        $elapsed += 5
+        Write-Host "`r`e[36m[HiClaw]`e[0m $(Get-Msg 'install.wait_matrix.waiting' -f $elapsed, $Timeout)" -NoNewline
+    }
+
+    Write-Host ""
+    Write-Error (Get-Msg "install.wait_matrix.timeout" -f $Timeout, $Container)
 }
 
 function New-EnvFile {
@@ -1552,6 +1587,9 @@ function Install-Manager {
 
     # Wait for ready
     Wait-ManagerReady -Container "hiclaw-manager"
+
+    # Wait for Matrix server to be ready
+    Wait-MatrixReady -Container "hiclaw-manager"
 
     # Create OpenAI-compatible provider if needed
     if ($config.LLM_PROVIDER -eq "openai-compat") {
