@@ -280,12 +280,16 @@ def patch(site: Path) -> None:
             "if TYPE_CHECKING:\n"
             "    from mcp.types import Tool",
         )
-        # Fix type annotation in from_mcp_tool
+        # Fix type annotations that reference Tool at class-definition time
         src = src.replace(
             "def from_mcp_tool(cls, tool: Tool)",
             'def from_mcp_tool(cls, tool: "Tool")',
         )
-        # Lazy-import Tool inside to_mcp_tool method
+        src = src.replace(
+            "def to_mcp_tool(self) -> Tool:",
+            'def to_mcp_tool(self) -> "Tool":',
+        )
+        # Lazy-import Tool inside to_mcp_tool method body
         src = src.replace(
             "        return Tool(",
             "        from mcp.types import Tool as _McpTool\n"
