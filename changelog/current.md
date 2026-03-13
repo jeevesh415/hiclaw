@@ -19,3 +19,5 @@ Record image-affecting changes to `manager/`, `worker/`, `openclaw-base/` here b
 - fix(manager): convert project-management SKILL.md message templates from Chinese to English reference templates with "adapt language to human admin's preference" guidance — fixes intermittent test failures caused by language mismatch between SKILL.md templates and test grep patterns
 - fix(worker): remove `.openclaw/**` from file-sync exclude list so OpenClaw session and cron configurations are synced to MinIO
 - fix(copaw): Windows compatibility — catch `NotImplementedError` for signal handlers on Windows `ProactorEventLoop`; support `mc.exe` download on Windows in `_ensure_mc`; use `Path.as_posix()` for MinIO object keys to avoid backslash separators
+- feat(manager): add OpenClaw Console Higress route (`console-local.hiclaw.io`) with basic-auth protection; register all route domains via `/v1/domains` API during Higress setup
+- chore(manager,worker): update `openclaw-base` image tag to `20260313-5a0df68`
