@@ -1,6 +1,6 @@
 ---
 name: find-skills
-description: Discover and install agent skills from the open ecosystem. Use when you encounter an unfamiliar domain, framework, or workflow that you lack specialized knowledge about, or when Manager suggests searching for skills before starting a task.
+description: Discover and install agent skills from the open ecosystem. Use when you encounter an unfamiliar domain, framework, or workflow that you lack specialized knowledge about, or when your coordinator suggests searching for skills before starting a task.
 ---
 
 # Find Skills
@@ -17,6 +17,7 @@ Use this skill when the user:
 
 - Asks "how do I do X" where X might be a common task with an existing skill
 - Says "find a skill for X" or "is there a skill for X"
+- Says "import xxx skill from market", "install xxx skill from market", or otherwise explicitly asks you to import a skill from the market
 - Asks "can you do X" where X is a specialized capability
 - Expresses interest in extending agent capabilities
 - Wants to search for tools, templates, or workflows
@@ -28,10 +29,16 @@ The Skills CLI (`skills`) is the package manager for the open agent skills ecosy
 
 If `skills` command is not found, install it: `npm install -g skills`
 
+Always use this fixed script path for this skill. Do not rely on a relative `scripts/` path from your current directory:
+
+```bash
+FIND_SKILLS_SCRIPT="$HOME/.copaw-worker/${HICLAW_WORKER_NAME}/.copaw/active_skills/find-skills/scripts/hiclaw-find-skill.sh"
+```
+
 **Key commands:**
 
-- `skills find [query]` - Search for skills interactively or by keyword
-- `skills add <owner/repo@skill> -g -y` - Install a skill from GitHub or other sources
+- `"${FIND_SKILLS_SCRIPT}" find [query]` - Search for relevant skills
+- `"${FIND_SKILLS_SCRIPT}" install <skill>` - Install a skill
 - `skills check` - Check for skill updates
 - `skills update` - Update all installed skills
 
@@ -40,7 +47,7 @@ If `skills` command is not found, install it: `npm install -g skills`
 ## Environment Variables
 
 ```bash
-SKILLS_API_URL  # Skills registry API endpoint (default: https://skills.sh)
+SKILLS_API_URL  # Skills registry API endpoint (default: nacos://market.hiclaw.io:80/public)
 ```
 
 Can be configured by admin to point to an enterprise-private registry.
@@ -60,53 +67,58 @@ When a user asks for help with something, identify:
 Run the find command with a relevant query:
 
 ```bash
-skills find [query]
+"${FIND_SKILLS_SCRIPT}" find [query]
 ```
 
 For example:
 
-- User asks "how do I make my React app faster?" → `skills find react performance`
-- User asks "can you help me with PR reviews?" → `skills find pr review`
-- User asks "I need to create a changelog" → `skills find changelog`
+- User asks "how do I make my React app faster?" → `"${FIND_SKILLS_SCRIPT}" find react performance`
+- User asks "can you help me with PR reviews?" → `"${FIND_SKILLS_SCRIPT}" find pr review`
+- User asks "I need to create a changelog" → `"${FIND_SKILLS_SCRIPT}" find changelog`
 
 The command will return results like:
 
 ```
-Install with skills add <owner/repo@skill>
+Install with /root/.copaw-worker/${HICLAW_WORKER_NAME}/.copaw/active_skills/find-skills/scripts/hiclaw-find-skill.sh install <skill>
 
-vercel-labs/agent-skills@vercel-react-best-practices
-└ https://skills.sh/vercel-labs/agent-skills/vercel-react-best-practices
+vercel-react-best-practices
+└ React and Next.js performance guidance
 ```
 
-> **Critical**: Always use the exact `owner/repo@skill` format shown in search results.
-> Never guess or shorten the package name — doing so will fail.
->
-> ```bash
-> # Wrong ❌ - short name only
-> skills add higress-wasm-go-plugin -g -y
->
-> # Correct ✓ - full owner/repo@skill format from search results
-> skills add alibaba/higress@higress-wasm-go-plugin -g -y
-> ```
+> **Critical**: Always use the exact install command shown in search results.
+> Never guess or shorten the package name or command, because that may fail.
+
+### Step 2A: Direct Market Import Requests
+
+If the user already gave you a concrete skill name and asked to import it from the market, you can install it directly with this skill instead of doing a separate search first:
+
+```bash
+"${FIND_SKILLS_SCRIPT}" install <skill>
+```
+
+For example:
+
+- User says "import remotion-best-practices skill from market" → `"${FIND_SKILLS_SCRIPT}" install remotion-best-practices`
+- User says "install github-operations from market" → `"${FIND_SKILLS_SCRIPT}" install github-operations`
+
+If the provided name looks ambiguous or you are not sure about the exact package name, search first and then copy the exact install command from the results.
 
 ### Step 3: Present Options to the User
 
 When you find relevant skills, present them to the user with:
 
 1. The skill name and what it does
-2. The install command they can run (copy exactly from search results, including `owner/repo@`)
+2. The install command they can run (copy exactly from search results)
 3. A link to learn more at skills.sh
 
 Example response:
 
 ```
-I found a skill that might help! The "vercel-react-best-practices" skill provides
-React and Next.js performance optimization guidelines from Vercel Engineering.
+I found a skill that might help! The "remotion-best-practices" skill provides
+best practices for Remotion video creation in React.
 
 To install it:
-skills add vercel-labs/agent-skills@vercel-react-best-practices -g -y
-
-Learn more: https://skills.sh/vercel-labs/agent-skills/vercel-react-best-practices
+"${FIND_SKILLS_SCRIPT}" install remotion-best-practices
 ```
 
 ### Step 4: Offer to Install
@@ -114,10 +126,8 @@ Learn more: https://skills.sh/vercel-labs/agent-skills/vercel-react-best-practic
 If the user wants to proceed, you can install the skill for them:
 
 ```bash
-skills add <owner/repo@skill> -g -y
+"${FIND_SKILLS_SCRIPT}" install <skill>
 ```
-
-The `-g` flag installs globally (user-level) and `-y` skips confirmation prompts.
 
 The default install location for `skills add -g` is `~/.agents/skills/`. In container mode this is symlinked to the worker's MinIO-synced skills directory. In host mode (non-container), you need to check `~/.agents/skills/` for installed skills and load them manually.
 
@@ -159,9 +169,6 @@ If this is something you do often, you could create your own skill:
 skills init my-xyz-skill
 ```
 
-## Enterprise Private Registry
+## Skill Resources
 
-If your admin configured `SKILLS_API_URL` to point to an enterprise registry:
-- All searches will query the private registry
-- Skills from your organization will be available
-- You can still access public skills if the registry proxies them
+`$HOME/.copaw-worker/${HICLAW_WORKER_NAME}/.copaw/active_skills/find-skills/scripts/hiclaw-find-skill.sh` is the resource that belongs to this skill. Always invoke that exact path (or the `FIND_SKILLS_SCRIPT` variable above) instead of `scripts/hiclaw-find-skill.sh`, so your command does not depend on the current directory.

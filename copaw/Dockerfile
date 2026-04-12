@@ -50,18 +50,18 @@ RUN JEMALLOC=$(find /usr/lib -name 'libjemalloc.so.2' -print -quit) \
     && echo "LD_PRELOAD=${JEMALLOC}" >> /etc/environment \
     && echo "${JEMALLOC}" > /etc/ld.so.preload
 
-# mc (MinIO Client)
-COPY --from=mc /usr/bin/mc /usr/local/bin/mc
+# mc (MinIO Client) — real binary; wrapper installed after shared libs are copied
+COPY --from=mc /usr/bin/mc /usr/local/bin/mc.bin
 
 ARG NPM_REGISTRY=https://registry.npmjs.org/
 
-# Install Node.js 22 for mcporter and skills CLI
+# Install Node.js 22 for shared Worker CLIs
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
 RUN npm config set registry ${NPM_REGISTRY} && \
-    npm install -g mcporter skills && \
+    npm install -g mcporter skills @nacos-group/cli && \
     rm -rf /root/.npm
 
 # Download lite CoPaw source archive from GitHub
@@ -132,6 +132,10 @@ COPY --chmod=755 scripts/copaw-worker-entrypoint.sh /opt/hiclaw/scripts/copaw-wo
 
 # Shared environment bootstrap and credential management (hiclaw-env.sh, oss-credentials.sh)
 COPY --from=shared . /opt/hiclaw/scripts/lib/
+
+# mc wrapper: auto-refreshes STS credentials before every mc invocation (no-op in local mode)
+RUN chmod +x /opt/hiclaw/scripts/lib/mc-wrapper.sh && \
+    ln -sf /opt/hiclaw/scripts/lib/mc-wrapper.sh /usr/local/bin/mc
 
 # Create workspace directories for both modes
 RUN mkdir -p /root/.copaw-worker

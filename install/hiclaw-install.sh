@@ -26,16 +26,31 @@
 #   HICLAW_INSTALL_MANAGER_IMAGE       Override manager image (e.g., local build)
 #   HICLAW_INSTALL_WORKER_IMAGE        Override worker image  (e.g., local build)
 #   HICLAW_INSTALL_COPAW_WORKER_IMAGE  Override copaw worker image (e.g., local build)
+#   HICLAW_NACOS_REGISTRY_URI          Default Nacos registry URI for Worker market search/import
+#                                      (default: nacos://market.hiclaw.io:80/public)
+#   HICLAW_NACOS_USERNAME              Default Nacos username for nacos:// package imports (optional)
+#   HICLAW_NACOS_PASSWORD              Default Nacos password for nacos:// package imports (optional)
+#   HICLAW_CMS_TRACES_ENABLED          Enable openclaw-cms-plugin traces for Manager AND all Workers (default: false)
+#   HICLAW_CMS_ENDPOINT                ARMS OTLP endpoint (required if traces enabled)
+#   HICLAW_CMS_LICENSE_KEY             CMS license key (required if traces enabled)
+#   HICLAW_CMS_PROJECT                 CMS project name (optional)
+#   HICLAW_CMS_WORKSPACE               CMS workspace ID (required if traces enabled)
+#   HICLAW_CMS_SERVICE_NAME            Manager service name in ARMS (default: hiclaw-manager)
+#                                      Workers always report as hiclaw-worker-<name> automatically
+#   HICLAW_CMS_METRICS_ENABLED         Enable diagnostics-otel metrics for Manager AND all Workers (default: false)
 #   HICLAW_PORT_GATEWAY       Host port for Higress gateway (default: 18080)
 #   HICLAW_PORT_CONSOLE       Host port for Higress console (default: 18001)
 #   HICLAW_PORT_ELEMENT_WEB   Host port for Element Web direct access (default: 18088)
+#   HICLAW_PORT_MANAGER_CONSOLE  Host port for Manager console (default: 18888)
 #   HICLAW_WORKER_IDLE_TIMEOUT  Worker idle timeout in minutes (default: 720, i.e. 12 hours)
 
 set -e
 
-HICLAW_VERSION="${HICLAW_VERSION:-latest}"
+HICLAW_VERSION="${HICLAW_VERSION:-}"
+HICLAW_KNOWN_STABLE_VERSION="v1.0.9"   # fallback if GitHub API is unreachable
 HICLAW_NON_INTERACTIVE="${HICLAW_NON_INTERACTIVE:-0}"
 HICLAW_MOUNT_SOCKET="${HICLAW_MOUNT_SOCKET:-1}"
+HICLAW_DOCKER_PROXY="${HICLAW_DOCKER_PROXY:-1}"
 STEP_RESULT=""  # Used by state machine to signal "back" navigation
 
 # ============================================================
@@ -202,6 +217,33 @@ msg() {
         "install.mode.manual_selected.en") text="Manual mode selected - you will choose LLM provider and customize options" ;;
         "install.mode.invalid.zh") text="无效选择，默认使用快速开始模式" ;;
         "install.mode.invalid.en") text="Invalid choice, defaulting to Quick Start mode" ;;
+        # --- Version selection ---
+        "install.version.title.zh") text="--- 版本选择 ---" ;;
+        "install.version.title.en") text="--- Version Selection ---" ;;
+        "install.version.choose.zh") text="选择要安装的版本:" ;;
+        "install.version.choose.en") text="Choose the version to install:" ;;
+        "install.version.option_latest.zh") text="  1) latest  - 最新版（默认）" ;;
+        "install.version.option_latest.en") text="  1) latest  - Latest build (default)" ;;
+        "install.version.option_stable.zh") text="  2) %s - 最新稳定版" ;;
+        "install.version.option_stable.en") text="  2) %s - Latest stable release" ;;
+        "install.version.fetching.zh") text="正在查询最新稳定版本..." ;;
+        "install.version.fetching.en") text="Fetching latest stable release..." ;;
+        "install.version.fetch_failed.zh") text="无法查询 GitHub，使用内置版本 %s" ;;
+        "install.version.fetch_failed.en") text="Could not reach GitHub, using built-in version %s" ;;
+        "install.version.option_custom.zh") text="  3) 自定义 - 手动输入版本号（如 v1.0.5）" ;;
+        "install.version.option_custom.en") text="  3) Custom  - Enter a specific version (e.g. v1.0.5)" ;;
+        "install.version.prompt.zh") text="请选择 [1/2/3]" ;;
+        "install.version.prompt.en") text="Enter choice [1/2/3]" ;;
+        "install.version.custom_prompt.zh") text="请输入版本号" ;;
+        "install.version.custom_prompt.en") text="Enter version tag" ;;
+        "install.version.selected_latest.zh") text="已选择最新版 (latest)" ;;
+        "install.version.selected_latest.en") text="Selected latest version" ;;
+        "install.version.selected_stable.zh") text="已选择最新稳定版 (%s)" ;;
+        "install.version.selected_stable.en") text="Selected latest stable version (%s)" ;;
+        "install.version.selected_custom.zh") text="已选择自定义版本 (%s)" ;;
+        "install.version.selected_custom.en") text="Selected custom version (%s)" ;;
+        "install.version.invalid.zh") text="无效选择，使用最新稳定版 (%s)" ;;
+        "install.version.invalid.en") text="Invalid choice, defaulting to latest stable version (%s)" ;;
         # --- Existing installation detected ---
         "install.existing.detected.zh") text="检测到已有 Manager 安装（env 文件: %s）" ;;
         "install.existing.detected.en") text="Existing Manager installation detected (env file: %s)" ;;
@@ -248,6 +290,10 @@ msg() {
         "install.reinstall.warn_workspace.en") text="   - Manager workspace: %s" ;;
         "install.reinstall.warn_workers.zh") text="   - 所有 worker 容器" ;;
         "install.reinstall.warn_workers.en") text="   - All worker containers" ;;
+        "install.reinstall.warn_proxy.zh") text="   - Docker API 代理容器: hiclaw-docker-proxy" ;;
+        "install.reinstall.warn_proxy.en") text="   - Docker API proxy container: hiclaw-docker-proxy" ;;
+        "install.reinstall.warn_network.zh") text="   - Docker 网络: hiclaw-net" ;;
+        "install.reinstall.warn_network.en") text="   - Docker network: hiclaw-net" ;;
         "install.reinstall.confirm_type.zh") text="请输入工作空间路径以确认删除（或按 Ctrl+C 取消）:" ;;
         "install.reinstall.confirm_type.en") text="To confirm deletion, please type the workspace path:" ;;
         "install.reinstall.confirm_path.zh") text="输入路径以确认（或按 Ctrl+C 取消）" ;;
@@ -262,6 +308,10 @@ msg() {
         "install.reinstall.removing_volume.en") text="Removing Docker volume: hiclaw-data" ;;
         "install.reinstall.warn_volume_fail.zh") text="  警告: 无法移除卷（可能有引用）" ;;
         "install.reinstall.warn_volume_fail.en") text="  Warning: Could not remove volume (may have references)" ;;
+        "install.reinstall.removing_proxy.zh") text="正在移除 Docker API 代理容器: hiclaw-docker-proxy" ;;
+        "install.reinstall.removing_proxy.en") text="Removing Docker API proxy container: hiclaw-docker-proxy" ;;
+        "install.reinstall.removing_network.zh") text="正在移除 Docker 网络: hiclaw-net" ;;
+        "install.reinstall.removing_network.en") text="Removing Docker network: hiclaw-net" ;;
         "install.reinstall.removing_workspace.zh") text="正在移除工作空间目录: %s" ;;
         "install.reinstall.removing_workspace.en") text="Removing workspace directory: %s" ;;
         "install.reinstall.removing_env.zh") text="正在移除 env 文件: %s" ;;
@@ -390,8 +440,10 @@ msg() {
         "port.console_prompt.en") text="Host port for Higress console (8001 inside container)" ;;
         "port.element_prompt.zh") text="Element Web 直接访问主机端口（容器内 8088）" ;;
         "port.element_prompt.en") text="Host port for Element Web direct access (8088 inside container)" ;;
-        "port.openclaw_console_prompt.zh") text="OpenClaw 控制台主机端口（容器内 18888）" ;;
-        "port.openclaw_console_prompt.en") text="Host port for OpenClaw console (18888 inside container)" ;;
+        "port.manager_console_prompt.zh") text="Manager 控制台主机端口（容器内 18888）" ;;
+        "port.manager_console_prompt.en") text="Host port for Manager console (18888 inside container)" ;;
+        "port.copaw_app_prompt.zh") text="CoPaw App API 主机端口（容器内 18799）" ;;
+        "port.copaw_app_prompt.en") text="Host port for CoPaw App API (18799 inside container)" ;;
         # --- Local-only binding ---
         "port.local_only.title.zh") text="--- 网络访问模式 ---" ;;
         "port.local_only.title.en") text="--- Network Access Mode ---" ;;
@@ -424,18 +476,18 @@ msg() {
         "domain.gateway_prompt.en") text="AI Gateway Domain" ;;
         "domain.fs_prompt.zh") text="文件系统域名" ;;
         "domain.fs_prompt.en") text="File System Domain" ;;
-        "domain.console_prompt.zh") text="OpenClaw 控制台域名" ;;
-        "domain.console_prompt.en") text="OpenClaw Console Domain" ;;
+        "domain.console_prompt.zh") text="Manager 控制台域名" ;;
+        "domain.console_prompt.en") text="Manager Console Domain" ;;
         # --- GitHub Integration ---
         "github.title.zh") text="--- GitHub 集成（可选，按回车跳过）---" ;;
         "github.title.en") text="--- GitHub Integration (optional, press Enter to skip) ---" ;;
         "github.token_prompt.zh") text="GitHub 个人访问令牌（可选）" ;;
         "github.token_prompt.en") text="GitHub Personal Access Token (optional)" ;;
         # --- Skills Registry ---
-        "skills.title.zh") text="--- Skills 注册中心（可选，按回车使用默认 https://skills.sh）---" ;;
-        "skills.title.en") text="--- Skills Registry (optional, press Enter for default https://skills.sh) ---" ;;
-        "skills.url_prompt.zh") text="Skills 注册中心 URL（留空使用默认 https://skills.sh）" ;;
-        "skills.url_prompt.en") text="Skills Registry URL (leave empty for default https://skills.sh)" ;;
+        "skills.title.zh") text="--- Skills 注册中心（可选，按回车使用默认 nacos://market.hiclaw.io:80/public）---" ;;
+        "skills.title.en") text="--- Skills Registry (optional, press Enter for default nacos://market.hiclaw.io:80/public) ---" ;;
+        "skills.url_prompt.zh") text="Skills 注册中心 URL（留空使用默认 nacos://market.hiclaw.io:80/public）" ;;
+        "skills.url_prompt.en") text="Skills Registry URL (leave empty for default nacos://market.hiclaw.io:80/public)" ;;
         # --- Data Persistence ---
         "data.title.zh") text="--- 数据持久化 ---" ;;
         "data.title.en") text="--- Data Persistence ---" ;;
@@ -468,6 +520,20 @@ msg() {
         "worker_runtime.choice.en") text="Enter choice [1/2]" ;;
         "worker_runtime.selected.zh") text="默认 Worker 运行时: %s" ;;
         "worker_runtime.selected.en") text="Default Worker runtime: %s" ;;
+        "worker_runtime.title_short.zh") text="默认 Worker 运行时" ;;
+        "worker_runtime.title_short.en") text="Default Worker Runtime" ;;
+        "manager_runtime.title.zh") text="--- Manager 运行时 ---" ;;
+        "manager_runtime.title.en") text="--- Manager Runtime ---" ;;
+        "manager_runtime.openclaw.zh") text="OpenClaw（Node.js）" ;;
+        "manager_runtime.openclaw.en") text="OpenClaw (Node.js)" ;;
+        "manager_runtime.copaw.zh") text="CoPaw（Python，AgentScope 框架）" ;;
+        "manager_runtime.copaw.en") text="CoPaw (Python, AgentScope framework)" ;;
+        "manager_runtime.choice.zh") text="请选择 [1/2]" ;;
+        "manager_runtime.choice.en") text="Enter choice [1/2]" ;;
+        "manager_runtime.selected.zh") text="Manager 运行时: %s" ;;
+        "manager_runtime.selected.en") text="Manager runtime: %s" ;;
+        "manager_runtime.title_short.zh") text="Manager 运行时" ;;
+        "manager_runtime.title_short.en") text="Manager Runtime" ;;
         # --- Secrets and config ---
         "install.generating_secrets.zh") text="正在生成密钥..." ;;
         "install.generating_secrets.en") text="Generating secrets..." ;;
@@ -504,11 +570,46 @@ msg() {
         "matrix_e2ee.selected_enabled.en") text="Matrix E2EE: enabled" ;;
         "matrix_e2ee.selected_disabled.zh") text="Matrix E2EE: 已禁用（默认）" ;;
         "matrix_e2ee.selected_disabled.en") text="Matrix E2EE: disabled (default)" ;;
+        "matrix_e2ee.title_short.zh") text="Matrix E2EE" ;;
+        "matrix_e2ee.title_short.en") text="Matrix E2EE" ;;
+        "matrix_e2ee.val_enabled.zh") text="已启用" ;;
+        "matrix_e2ee.val_enabled.en") text="enabled" ;;
+        "matrix_e2ee.val_disabled.zh") text="已禁用" ;;
+        "matrix_e2ee.val_disabled.en") text="disabled" ;;
+        # --- Docker API proxy ---
+        "docker_proxy.title.zh") text="--- Docker API 安全代理 ---" ;;
+        "docker_proxy.title.en") text="--- Docker API Security Proxy ---" ;;
+        "docker_proxy.desc.zh") text="Docker API 代理可防止 AI Agent 通过 Docker API 越狱访问宿主机。\n  启用后，Manager 不再直接持有 Docker socket，所有容器操作经过安全校验。" ;;
+        "docker_proxy.desc.en") text="Docker API proxy prevents AI Agents from escaping via Docker API to access the host.\n  When enabled, Manager no longer has direct Docker socket access; all container operations go through security validation." ;;
+        "docker_proxy.enable.zh") text="启用（推荐）" ;;
+        "docker_proxy.enable.en") text="Enable (recommended)" ;;
+        "docker_proxy.disable.zh") text="禁用（直接挂载 Docker socket）" ;;
+        "docker_proxy.disable.en") text="Disable (mount Docker socket directly)" ;;
+        "docker_proxy.choice.zh") text="请选择 [1/2]" ;;
+        "docker_proxy.choice.en") text="Enter choice [1/2]" ;;
+        "docker_proxy.selected_enabled.zh") text="Docker API 代理: 已启用" ;;
+        "docker_proxy.selected_enabled.en") text="Docker API proxy: enabled" ;;
+        "docker_proxy.selected_disabled.zh") text="Docker API 代理: 已禁用" ;;
+        "docker_proxy.selected_disabled.en") text="Docker API proxy: disabled" ;;
+        "docker_proxy.title_short.zh") text="Docker API 代理" ;;
+        "docker_proxy.title_short.en") text="Docker API Proxy" ;;
+        "docker_proxy.val_enabled.zh") text="已启用" ;;
+        "docker_proxy.val_enabled.en") text="enabled" ;;
+        "docker_proxy.val_disabled.zh") text="已禁用" ;;
+        "docker_proxy.val_disabled.en") text="disabled" ;;
+        "docker_proxy.registries_desc.zh") text="默认放行的镜像来源：本地镜像、localhost、Higress 仓库（所有 region）。\n  如需放行其他镜像仓库，请输入逗号分隔的地址前缀。\n  示例: ghcr.io/myorg,registry.example.com/team" ;;
+        "docker_proxy.registries_desc.en") text="Default allowed image sources: local images, localhost, Higress registries (all regions).\n  To allow additional image sources, enter comma-separated address prefixes.\n  Example: ghcr.io/myorg,registry.example.com/team" ;;
+        "docker_proxy.registries_prompt.zh") text="额外放行的镜像来源（按回车跳过）" ;;
+        "docker_proxy.registries_prompt.en") text="Additional allowed image sources (press Enter to skip)" ;;
+        "docker_proxy.registries_label.zh") text="额外放行的镜像来源" ;;
+        "docker_proxy.registries_label.en") text="Additional allowed image sources" ;;
         # --- Worker idle timeout ---
         "idle_timeout.prompt.zh") text="Worker 空闲自动停止超时（分钟）[720]" ;;
         "idle_timeout.prompt.en") text="Worker idle auto-stop timeout in minutes [720]" ;;
         "idle_timeout.selected.zh") text="Worker 空闲超时: %s 分钟" ;;
         "idle_timeout.selected.en") text="Worker idle timeout: %s minutes" ;;
+        "idle_timeout.label.zh") text="Worker 空闲超时（分钟）" ;;
+        "idle_timeout.label.en") text="Worker idle timeout (min)" ;;
         # --- YOLO mode ---
         "install.yolo.zh") text="YOLO 模式已启用（自主决策，无交互提示）" ;;
         "install.yolo.en") text="YOLO mode enabled (autonomous decisions, no interactive prompts)" ;;
@@ -555,6 +656,30 @@ msg() {
         "llm.openai.test.no_curl.en") text="⚠️  curl not found, skipping API connectivity test" ;;
         "llm.openai.test.confirm.zh") text="是否仍要继续安装？[y/N/b] " ;;
         "llm.openai.test.confirm.en") text="Continue with installation anyway? [y/N/b] " ;;
+        "llm.embedding.title.zh") text="📦 记忆搜索配置" ;;
+        "llm.embedding.title.en") text="📦 Memory Search Configuration" ;;
+        "llm.embedding.hint.zh") text="  Embedding 模型可提升记忆搜索质量（语义匹配）。不启用也可正常使用记忆功能（关键词匹配）。" ;;
+        "llm.embedding.hint.en") text="  Embedding model improves memory search quality (semantic matching). Memory still works without it (keyword matching)." ;;
+        "llm.embedding.option.default.zh") text="  1) text-embedding-v4（推荐）" ;;
+        "llm.embedding.option.default.en") text="  1) text-embedding-v4 (Recommended)" ;;
+        "llm.embedding.option.custom.zh") text="  2) 自定义 Embedding 模型" ;;
+        "llm.embedding.option.custom.en") text="  2) Custom embedding model" ;;
+        "llm.embedding.option.disable.zh") text="  3) 不启用" ;;
+        "llm.embedding.option.disable.en") text="  3) Do not enable" ;;
+        "llm.embedding.select.zh") text="选择" ;;
+        "llm.embedding.select.en") text="Select" ;;
+        "llm.embedding.custom_prompt.zh") text="  Embedding 模型名称" ;;
+        "llm.embedding.custom_prompt.en") text="  Embedding model name" ;;
+        "llm.embedding.test.testing.zh") text="正在测试 Embedding API 联通性..." ;;
+        "llm.embedding.test.testing.en") text="Testing Embedding API connectivity..." ;;
+        "llm.embedding.test.ok.zh") text="✅ Embedding API 联通性测试通过" ;;
+        "llm.embedding.test.ok.en") text="✅ Embedding API connectivity test passed" ;;
+        "llm.embedding.test.fail.zh") text="⚠️  Embedding API 测试失败（HTTP %s）。响应: %s" ;;
+        "llm.embedding.test.fail.en") text="⚠️  Embedding API test failed (HTTP %s). Response: %s" ;;
+        "llm.embedding.auto_disabled.zh") text="⚠️  Embedding 已自动禁用，记忆搜索将使用关键词匹配。您可以稍后在 hiclaw-manager.env 中设置 HICLAW_EMBEDDING_MODEL 启用。" ;;
+        "llm.embedding.auto_disabled.en") text="⚠️  Embedding auto-disabled. Memory search will use keyword matching. You can enable it later in hiclaw-manager.env by setting HICLAW_EMBEDDING_MODEL." ;;
+        "llm.embedding.disabled.zh") text="ℹ️  Embedding 已禁用，记忆搜索将使用关键词匹配。" ;;
+        "llm.embedding.disabled.en") text="ℹ️  Embedding disabled. Memory search will use keyword matching." ;;
         "llm.openai.test.aborted.zh") text="安装已中止。" ;;
         "llm.openai.test.aborted.en") text="Installation aborted." ;;
         "nav.back_hint.zh") text="（输入 b 返回上一步）" ;;
@@ -637,10 +762,12 @@ msg() {
         "success.other_consoles.en") text="--- Other Consoles ---" ;;
         "success.higress_console.zh") text="  Higress 控制台: http://localhost:%s（用户名: %s / 密码: %s）" ;;
         "success.higress_console.en") text="  Higress Console: http://localhost:%s (Username: %s / Password: %s)" ;;
-        "success.openclaw_console.zh") text="  OpenClaw 控制台（本地）: http://localhost:%s（无需登录）" ;;
-        "success.openclaw_console.en") text="  OpenClaw Console (local): http://localhost:%s (no login required)" ;;
-        "success.openclaw_console_gateway.zh") text="  OpenClaw 控制台（网关）: http://console-local.hiclaw.io（用户名: %s / 密码: %s）" ;;
-        "success.openclaw_console_gateway.en") text="  OpenClaw Console (gateway): http://console-local.hiclaw.io (Username: %s / Password: %s)" ;;
+        "success.manager_console.zh") text="  Manager 控制台（本地）: http://localhost:%s（无需登录）" ;;
+        "success.manager_console.en") text="  Manager Console (local): http://localhost:%s (no login required)" ;;
+        "success.manager_console_gateway.zh") text="  Manager 控制台（网关）: http://console-local.hiclaw.io（用户名: %s / 密码: %s）" ;;
+        "success.manager_console_gateway.en") text="  Manager Console (gateway): http://console-local.hiclaw.io (Username: %s / Password: %s)" ;;
+        "success.copaw_console.zh") text="  CoPaw App API: http://localhost:%s（无需登录）" ;;
+        "success.copaw_console.en") text="  CoPaw App API: http://localhost:%s (no login required)" ;;
         "success.switch_llm.title.zh") text="--- 切换 LLM 提供商 ---" ;;
         "success.switch_llm.title.en") text="--- Switch LLM Providers ---" ;;
         "success.switch_llm.hint.zh") text="  您可以通过 Higress 控制台切换到其他 LLM 提供商（OpenAI、Anthropic 等）。" ;;
@@ -753,14 +880,53 @@ detect_registry() {
 }
 
 HICLAW_REGISTRY="${HICLAW_REGISTRY:-$(detect_registry)}"
-MANAGER_IMAGE="${HICLAW_INSTALL_MANAGER_IMAGE:-${HICLAW_REGISTRY}/higress/hiclaw-manager:${HICLAW_VERSION}}"
-WORKER_IMAGE="${HICLAW_INSTALL_WORKER_IMAGE:-${HICLAW_REGISTRY}/higress/hiclaw-worker:${HICLAW_VERSION}}"
-COPAW_WORKER_IMAGE="${HICLAW_INSTALL_COPAW_WORKER_IMAGE:-${HICLAW_REGISTRY}/higress/hiclaw-copaw-worker:${HICLAW_VERSION}}"
+# Image variables are resolved after version selection in step_version().
+# These placeholders allow early code paths to reference them without errors.
+MANAGER_IMAGE="${HICLAW_INSTALL_MANAGER_IMAGE:-}"
+MANAGER_COPAW_IMAGE="${HICLAW_INSTALL_MANAGER_COPAW_IMAGE:-}"
+WORKER_IMAGE="${HICLAW_INSTALL_WORKER_IMAGE:-}"
+COPAW_WORKER_IMAGE="${HICLAW_INSTALL_COPAW_WORKER_IMAGE:-}"
+DOCKER_PROXY_IMAGE="${HICLAW_INSTALL_DOCKER_PROXY_IMAGE:-}"
+
+resolve_image_tags() {
+    MANAGER_IMAGE="${HICLAW_INSTALL_MANAGER_IMAGE:-${HICLAW_REGISTRY}/higress/hiclaw-manager:${HICLAW_VERSION}}"
+    MANAGER_COPAW_IMAGE="${HICLAW_INSTALL_MANAGER_COPAW_IMAGE:-${HICLAW_REGISTRY}/higress/hiclaw-manager-copaw:${HICLAW_VERSION}}"
+    WORKER_IMAGE="${HICLAW_INSTALL_WORKER_IMAGE:-${HICLAW_REGISTRY}/higress/hiclaw-worker:${HICLAW_VERSION}}"
+    COPAW_WORKER_IMAGE="${HICLAW_INSTALL_COPAW_WORKER_IMAGE:-${HICLAW_REGISTRY}/higress/hiclaw-copaw-worker:${HICLAW_VERSION}}"
+    # docker-proxy: prefer versioned tag, fall back to :latest at pull time
+    # via resolve_docker_proxy_image().
+    DOCKER_PROXY_IMAGE="${HICLAW_INSTALL_DOCKER_PROXY_IMAGE:-${HICLAW_REGISTRY}/higress/hiclaw-docker-proxy:${HICLAW_VERSION}}"
+}
+
+# Resolve the docker-proxy image: try the versioned tag first; if the registry
+# doesn't have it (component didn't exist yet in that release), fall back to :latest.
+# Sets DOCKER_PROXY_IMAGE to the tag that will actually be pulled.
+resolve_docker_proxy_image() {
+    # If the user explicitly overrode the image, respect it as-is.
+    [ -n "${HICLAW_INSTALL_DOCKER_PROXY_IMAGE:-}" ] && return 0
+
+    local _versioned="${HICLAW_REGISTRY}/higress/hiclaw-docker-proxy:${HICLAW_VERSION}"
+    local _latest="${HICLAW_REGISTRY}/higress/hiclaw-docker-proxy:latest"
+
+    # Skip probe when HICLAW_VERSION is "latest" — no point trying the same tag twice.
+    if [ "${HICLAW_VERSION}" = "latest" ]; then
+        DOCKER_PROXY_IMAGE="${_latest}"
+        return 0
+    fi
+
+    if ${DOCKER_CMD} pull "${_versioned}" >/dev/null 2>&1; then
+        DOCKER_PROXY_IMAGE="${_versioned}"
+    else
+        log "docker-proxy ${HICLAW_VERSION} not found, using latest"
+        ${DOCKER_CMD} pull "${_latest}" >/dev/null 2>&1 || true
+        DOCKER_PROXY_IMAGE="${_latest}"
+    fi
+}
 
 # ============================================================
 # Known models list — used to detect custom models during install
 # ============================================================
-KNOWN_MODELS="gpt-5.4 gpt-5.3-codex gpt-5-mini gpt-5-nano claude-opus-4-6 claude-sonnet-4-6 claude-haiku-4-5 qwen3.5-plus deepseek-chat deepseek-reasoner kimi-k2.5 glm-5 MiniMax-M2.5"
+KNOWN_MODELS="gpt-5.4 gpt-5.3-codex gpt-5-mini gpt-5-nano claude-opus-4-6 claude-sonnet-4-6 claude-haiku-4-5 qwen3.5-plus deepseek-chat deepseek-reasoner kimi-k2.5 glm-5 MiniMax-M2.7 MiniMax-M2.7-highspeed MiniMax-M2.5"
 
 is_known_model() {
     local model="$1"
@@ -818,12 +984,23 @@ wait_manager_ready() {
 
     log "$(msg install.wait_ready "${timeout}")"
 
-    # Wait for OpenClaw gateway to be healthy inside the container
+    # Wait for Manager agent to be healthy inside the container
+    local runtime="${HICLAW_MANAGER_RUNTIME:-openclaw}"
     while [ "${elapsed}" -lt "${timeout}" ]; do
-        if ${DOCKER_CMD} exec "${container}" openclaw gateway health --json 2>/dev/null | grep -q '"ok"' 2>/dev/null; then
-            log "$(msg install.wait_ready.ok)"
-            return 0
-        fi
+        case "${runtime}" in
+            copaw)
+                if ${DOCKER_CMD} exec "${container}" curl -sf http://127.0.0.1:18799/api/agents 2>/dev/null | grep -q '"agents"'; then
+                    log "$(msg install.wait_ready.ok)"
+                    return 0
+                fi
+                ;;
+            *)
+                if ${DOCKER_CMD} exec "${container}" openclaw gateway health --json 2>/dev/null | grep -q '"ok"' 2>/dev/null; then
+                    log "$(msg install.wait_ready.ok)"
+                    return 0
+                fi
+                ;;
+        esac
         sleep 5
         elapsed=$((elapsed + 5))
         printf "\r\033[36m[HiClaw]\033[0m $(msg install.wait_ready.waiting "${elapsed}" "${timeout}")"
@@ -854,251 +1031,6 @@ wait_matrix_ready() {
     error "$(msg install.wait_matrix.timeout "${timeout}" "${container}")"
 }
 
-# ============================================================
-# Send welcome message to Manager
-# ============================================================
-
-send_welcome_message() {
-    local container="hiclaw-manager"
-
-    # Skip if Manager has already completed soul configuration
-    if ${DOCKER_CMD} exec "${container}" test -f /root/manager-workspace/soul-configured 2>/dev/null; then
-        log "$(msg install.welcome_msg.soul_configured)"
-        return 0
-    fi
-
-    local admin_user="${HICLAW_ADMIN_USER:-admin}"
-    local admin_password="${HICLAW_ADMIN_PASSWORD}"
-    local matrix_domain="${HICLAW_MATRIX_DOMAIN}"
-    local language="${HICLAW_LANGUAGE}"
-    local timezone="${HICLAW_TIMEZONE}"
-
-    # Helper: run curl inside the manager container to reach Matrix directly
-    mcurl() { ${DOCKER_CMD} exec "${container}" curl "$@"; }
-
-    # Login to get admin access token
-    log "$(msg install.welcome_msg.logging_in "${admin_user}")"
-
-    # Run all Matrix API calls and jq parsing inside the container (jq is only available there).
-    # Pass language/timezone via env vars to avoid special-character injection into the script body.
-    local inner_script
-    inner_script=$(cat <<'INNER_SCRIPT'
-MATRIX_URL="http://127.0.0.1:6167"
-MANAGER_FULL_ID="@manager:${MATRIX_DOMAIN}"
-
-_raw=$(curl -s -w '\nHTTP_CODE:%{http_code}' -X POST "${MATRIX_URL}/_matrix/client/v3/login" \
-    -H 'Content-Type: application/json' \
-    -d "{\"type\":\"m.login.password\",\"identifier\":{\"type\":\"m.id.user\",\"user\":\"${ADMIN_USER}\"},\"password\":\"${ADMIN_PASSWORD}\"}" 2>&1) || true
-_http_code=$(echo "${_raw}" | tail -1 | sed 's/HTTP_CODE://')
-login_resp=$(echo "${_raw}" | sed '$d')
-access_token=$(echo "${login_resp}" | jq -r '.access_token // empty' 2>/dev/null)
-if [ -z "${access_token}" ]; then
-    echo "LOGIN_FAILED (HTTP ${_http_code}): ${login_resp}"; exit 0
-fi
-
-room_id=""
-rooms=$(curl -sf "${MATRIX_URL}/_matrix/client/v3/joined_rooms" \
-    -H "Authorization: Bearer ${access_token}" 2>/dev/null | jq -r '.joined_rooms[]' 2>/dev/null) || true
-for rid in ${rooms}; do
-    members=$(curl -sf "${MATRIX_URL}/_matrix/client/v3/rooms/${rid}/members" \
-        -H "Authorization: Bearer ${access_token}" 2>/dev/null | jq -r '.chunk[].state_key' 2>/dev/null) || continue
-    member_count=$(echo "${members}" | wc -l | xargs)
-    if [ "${member_count}" = "2" ] && echo "${members}" | grep -q "@manager:"; then
-        room_id="${rid}"; break
-    fi
-done
-
-if [ -z "${room_id}" ]; then
-    _raw=$(curl -s -w '\nHTTP_CODE:%{http_code}' -X POST "${MATRIX_URL}/_matrix/client/v3/createRoom" \
-        -H "Authorization: Bearer ${access_token}" \
-        -H 'Content-Type: application/json' \
-        -d "{\"is_direct\":true,\"invite\":[\"${MANAGER_FULL_ID}\"],\"preset\":\"trusted_private_chat\"}" 2>&1) || true
-    _http_code=$(echo "${_raw}" | tail -1 | sed 's/HTTP_CODE://')
-    create_resp=$(echo "${_raw}" | sed '$d')
-    room_id=$(echo "${create_resp}" | jq -r '.room_id // empty' 2>/dev/null)
-    if [ -z "${room_id}" ]; then
-        echo "NO_ROOM (HTTP ${_http_code}): ${create_resp}"; exit 0
-    fi
-fi
-
-# Wait for Manager to join; bail out if it never does (avoids 403 on send)
-manager_joined=false
-wait_elapsed=0
-while [ "${wait_elapsed}" -lt 60 ]; do
-    members=$(curl -sf "${MATRIX_URL}/_matrix/client/v3/rooms/${room_id}/members" \
-        -H "Authorization: Bearer ${access_token}" 2>/dev/null | jq -r '.chunk[].state_key' 2>/dev/null) || true
-    if echo "${members}" | grep -q "${MANAGER_FULL_ID}"; then
-        manager_joined=true; break
-    fi
-    sleep 2; wait_elapsed=$((wait_elapsed + 2))
-done
-if [ "${manager_joined}" != "true" ]; then
-    echo "NO_ROOM: Manager did not join room ${room_id} within 60s"; exit 0
-fi
-
-# HICLAW_LANGUAGE and HICLAW_TIMEZONE are passed in via -e flags; use them directly
-welcome_msg="This is an automated message from the HiClaw installation script. This is a fresh installation.
-
---- Installation Context ---
-User Language: ${HICLAW_LANGUAGE}  (zh = Chinese, en = English)
-User Timezone: ${HICLAW_TIMEZONE}  (IANA timezone identifier)
----
-
-You are an AI agent that manages a team of worker agents. Your identity and personality have not been configured yet — the human admin is about to meet you for the first time.
-
-Please begin the onboarding conversation:
-
-1. Greet the admin warmly and briefly describe what you can do (coordinate workers, manage tasks, run multi-agent projects) — without referring to yourself by any specific title yet
-2. The user has selected \"${HICLAW_LANGUAGE}\" as their preferred language during installation. Use this language for your greeting and all subsequent communication.
-3. The user's timezone is ${HICLAW_TIMEZONE}. Based on this timezone, you may infer their likely region and suggest additional language options (e.g., Japanese, Korean, German, etc.) that they might prefer for future interactions.
-4. Ask them the following questions (one message is fine):
-   a. What would they like to call you? (name or title)
-   b. What communication style do they prefer? (e.g. formal, casual, concise, detailed)
-   c. Any specific behavior guidelines or constraints they want you to follow?
-   d. Confirm the default language they want you to use (offer alternatives based on timezone)
-5. After they reply, write their preferences to the \"Identity & Personality\" section of ~/SOUL.md — replace the \"(not yet configured)\" placeholder with the configured identity
-6. Confirm what you wrote, and ask if they would like to adjust anything
-7. Once the admin confirms the identity is set, run: touch ~/soul-configured
-
-The human admin will start chatting shortly."
-
-txn_id="welcome-$(date +%s)"
-payload=$(jq -nc --arg body "${welcome_msg}" '{"msgtype":"m.text","body":$body}')
-_raw=$(curl -s -w '\nHTTP_CODE:%{http_code}' -X PUT "${MATRIX_URL}/_matrix/client/v3/rooms/${room_id}/send/m.room.message/${txn_id}" \
-    -H "Authorization: Bearer ${access_token}" \
-    -H 'Content-Type: application/json' \
-    -d "${payload}" 2>&1) || true
-_http_code=$(echo "${_raw}" | tail -1 | sed 's/HTTP_CODE://')
-send_resp=$(echo "${_raw}" | sed '$d')
-if echo "${send_resp}" | jq -e '.event_id' > /dev/null 2>&1; then
-    echo "OK"
-else
-    echo "SEND_FAILED (HTTP ${_http_code}): ${send_resp}"; exit 0
-fi
-INNER_SCRIPT
-)
-
-    local result
-    # Pass credentials and language/timezone as env vars (-e) so they never touch the script body.
-    # Use ${DOCKER_CMD} consistently (supports both docker and podman).
-    result=$(${DOCKER_CMD} exec \
-        -e ADMIN_USER="${admin_user}" \
-        -e ADMIN_PASSWORD="${admin_password}" \
-        -e MATRIX_DOMAIN="${matrix_domain}" \
-        -e HICLAW_LANGUAGE="${language}" \
-        -e HICLAW_TIMEZONE="${timezone}" \
-        "${container}" bash -c "${inner_script}")
-
-    case "${result}" in
-        *LOGIN_FAILED*)
-            local detail="${result#*LOGIN_FAILED: }"
-            log "$(msg install.welcome_msg.login_failed "${admin_user}")"
-            [ -n "${detail}" ] && [ "${detail}" != "${result}" ] && log "  Detail: ${detail}"
-            return 1 ;;
-        *NO_ROOM*)
-            local detail="${result#*NO_ROOM: }"
-            log "$(msg install.welcome_msg.no_room)"
-            [ -n "${detail}" ] && [ "${detail}" != "${result}" ] && log "  Detail: ${detail}"
-            return 1 ;;
-        *SEND_FAILED*)
-            local detail="${result#*SEND_FAILED: }"
-            log "$(msg install.welcome_msg.send_failed)"
-            [ -n "${detail}" ] && [ "${detail}" != "${result}" ] && log "  Detail: ${detail}"
-            return 1 ;;
-        *OK*)
-            log "$(msg install.welcome_msg.sent)"
-            return 0 ;;
-        *)
-            log "WARNING: send_welcome_message got unexpected result: ${result}"
-            log "$(msg install.welcome_msg.send_failed)"
-            return 1 ;;
-    esac
-}
-
-# ============================================================
-# Ensure admin DM room ID is persisted in state.json
-# Works for both fresh install and upgrade scenarios.
-# ============================================================
-
-ensure_admin_dm_room() {
-    local container="$1"
-    local admin_user="${HICLAW_ADMIN_USER:-admin}"
-    local matrix_domain="${HICLAW_MATRIX_DOMAIN}"
-
-    local inner_script
-    inner_script=$(cat <<'INNER_SCRIPT'
-MATRIX_URL="http://127.0.0.1:6167"
-STATE_SCRIPT="/opt/hiclaw/agent/skills/task-management/scripts/manage-state.sh"
-ADMIN_FULL_ID="@${ADMIN_USER}:${MATRIX_DOMAIN}"
-
-# Check if admin_dm_room_id is already set in state.json
-if [ -f ~/state.json ]; then
-    existing=$(jq -r '.admin_dm_room_id // empty' ~/state.json 2>/dev/null)
-    if [ -n "${existing}" ] && [ "${existing}" != "null" ]; then
-        echo "ALREADY_SET:${existing}"
-        exit 0
-    fi
-fi
-
-# Login as manager to discover rooms
-login_resp=$(curl -sf -X POST "${MATRIX_URL}/_matrix/client/v3/login" \
-    -H 'Content-Type: application/json' \
-    -d "{\"type\":\"m.login.password\",\"identifier\":{\"type\":\"m.id.user\",\"user\":\"manager\"},\"password\":\"${MANAGER_PASSWORD}\"}" 2>/dev/null) || true
-token=$(echo "${login_resp}" | jq -r '.access_token // empty' 2>/dev/null)
-if [ -z "${token}" ]; then
-    echo "LOGIN_FAILED"; exit 0
-fi
-
-# Find DM room: exactly 2 members, one is admin
-dm_room=""
-rooms=$(curl -sf "${MATRIX_URL}/_matrix/client/v3/joined_rooms" \
-    -H "Authorization: Bearer ${token}" 2>/dev/null | jq -r '.joined_rooms[]' 2>/dev/null) || true
-for rid in ${rooms}; do
-    members=$(curl -sf "${MATRIX_URL}/_matrix/client/v3/rooms/${rid}/members" \
-        -H "Authorization: Bearer ${token}" 2>/dev/null | jq -r '.chunk[].state_key' 2>/dev/null) || continue
-    count=$(echo "${members}" | grep -c '.' 2>/dev/null || echo 0)
-    if [ "${count}" -eq 2 ] && echo "${members}" | grep -q "${ADMIN_FULL_ID}"; then
-        dm_room="${rid}"
-        break
-    fi
-done
-
-if [ -z "${dm_room}" ]; then
-    echo "NO_DM_ROOM"; exit 0
-fi
-
-# Persist to state.json
-if [ -f "${STATE_SCRIPT}" ]; then
-    bash "${STATE_SCRIPT}" --action init 2>/dev/null || true
-    bash "${STATE_SCRIPT}" --action set-admin-dm --room-id "${dm_room}" 2>/dev/null || true
-fi
-echo "OK:${dm_room}"
-INNER_SCRIPT
-)
-
-    local mgr_password
-    mgr_password=$(${DOCKER_CMD} exec "${container}" bash -c 'source /data/hiclaw-secrets.env 2>/dev/null && echo "${HICLAW_MANAGER_PASSWORD}"' 2>/dev/null)
-
-    local result
-    result=$(${DOCKER_CMD} exec \
-        -e ADMIN_USER="${admin_user}" \
-        -e MATRIX_DOMAIN="${matrix_domain}" \
-        -e MANAGER_PASSWORD="${mgr_password}" \
-        "${container}" bash -c "${inner_script}" 2>/dev/null) || true
-
-    case "${result}" in
-        ALREADY_SET*)
-            log "Admin DM room already in state.json: ${result#ALREADY_SET:}" ;;
-        OK*)
-            log "Admin DM room persisted to state.json: ${result#OK:}" ;;
-        NO_DM_ROOM)
-            log "WARNING: Admin DM room not found (will be discovered during heartbeat)" ;;
-        LOGIN_FAILED)
-            log "WARNING: Could not login as manager to discover DM room" ;;
-        *)
-            log "WARNING: ensure_admin_dm_room unexpected result: ${result}" ;;
-    esac
-}
 # In non-interactive mode, uses default or errors if required and no default.
 # Usage: prompt VAR_NAME "Prompt text" "default" [true=secret]
 prompt() {
@@ -1122,7 +1054,7 @@ prompt() {
                     display_value="${current_value:0:4}****${current_value: -4}"
                 fi
             fi
-            log "$(msg prompt.upgrade_keep "${var_name}" "${display_value}")"
+            log "$(msg prompt.upgrade_keep "${prompt_text}" "${display_value}")"
             local new_value=""
             if [ "${is_secret}" = "true" ]; then
                 read -s -e -p "${prompt_text}: " new_value
@@ -1136,7 +1068,7 @@ prompt() {
             fi
             return
         fi
-        log "$(msg prompt.preset "${var_name}")"
+        log "$(msg prompt.preset "${prompt_text}")"
         return
     fi
 
@@ -1144,11 +1076,11 @@ prompt() {
     if [ "${HICLAW_NON_INTERACTIVE}" = "1" ] || [ "${HICLAW_QUICKSTART}" = "1" ]; then
         if [ -n "${default_value}" ]; then
             eval "export ${var_name}='${default_value}'"
-            log "$(msg prompt.default "${var_name}" "${default_value}")"
+            log "$(msg prompt.default "${prompt_text}" "${default_value}")"
             return
         elif [ "${HICLAW_NON_INTERACTIVE}" = "1" ]; then
             # Only hard-error in fully non-interactive mode, not quickstart
-            error "$(msg prompt.required "${var_name}")"
+            error "$(msg prompt.required "${prompt_text}")"
         fi
         # quickstart + no default: fall through to interactive prompt below
     fi
@@ -1168,7 +1100,7 @@ prompt() {
 
     value="${value:-${default_value}}"
     if [ -z "${value}" ]; then
-        error "$(msg prompt.required_empty "${var_name}")"
+        error "$(msg prompt.required_empty "${prompt_text}")"
     fi
 
     eval "export ${var_name}='${value}'"
@@ -1200,12 +1132,12 @@ prompt_optional() {
             fi
             if [ -n "${current_value}" ]; then
                 if [ "${is_secret}" = "true" ]; then
-                    log "$(msg prompt.upgrade_keep_secret "${var_name}" "${display_value}")"
+                    log "$(msg prompt.upgrade_keep_secret "${prompt_text}" "${display_value}")"
                 else
-                    log "$(msg prompt.upgrade_keep "${var_name}" "${display_value}")"
+                    log "$(msg prompt.upgrade_keep "${prompt_text}" "${display_value}")"
                 fi
             else
-                log "$(msg prompt.upgrade_empty "${var_name}")"
+                log "$(msg prompt.upgrade_empty "${prompt_text}")"
             fi
             local new_value=""
             if [ "${is_secret}" = "true" ]; then
@@ -1220,7 +1152,7 @@ prompt_optional() {
             fi
             return
         fi
-        log "$(msg prompt.preset "${var_name}")"
+        log "$(msg prompt.preset "${prompt_text}")"
         return
     fi
 
@@ -1326,6 +1258,9 @@ should_skip_step() {
         step_lang|step_mode)
             [ "${HICLAW_NON_INTERACTIVE}" = "1" ] && return 0
             ;;
+        step_version)
+            [ "${HICLAW_NON_INTERACTIVE}" = "1" ] && return 0
+            ;;
         step_existing)
             local _env="${HICLAW_ENV_FILE:-${HOME}/hiclaw-manager.env}"
             [ ! -f "${_env}" ] && return 0
@@ -1334,9 +1269,12 @@ should_skip_step() {
             [ "${HICLAW_NON_INTERACTIVE}" = "1" ] && return 0
             [ "${HICLAW_QUICKSTART}" = "1" ] && return 0
             ;;
-        step_e2ee|step_idle)
+        step_e2ee|step_idle|step_docker_proxy)
             [ "${HICLAW_NON_INTERACTIVE}" = "1" ] && return 0
             [ "${HICLAW_QUICKSTART}" = "1" ] && [ "${HICLAW_UPGRADE}" != "1" ] && return 0
+            ;;
+        step_manager_runtime)
+            [ "${HICLAW_NON_INTERACTIVE}" = "1" ] && return 0
             ;;
         step_hostshare)
             [ "${HICLAW_NON_INTERACTIVE}" = "1" ] && return 0
@@ -1351,6 +1289,7 @@ clear_step_vars() {
     local step_fn="$1"
     case "${step_fn}" in
         step_mode)   unset HICLAW_QUICKSTART ;;
+        step_version) unset HICLAW_VERSION ;;
         step_existing) unset HICLAW_UPGRADE UPGRADE_EXISTING_WORKERS ;;
         step_llm)
             unset HICLAW_LLM_PROVIDER HICLAW_DEFAULT_MODEL HICLAW_OPENAI_BASE_URL
@@ -1361,7 +1300,7 @@ clear_step_vars() {
         step_network) unset HICLAW_LOCAL_ONLY ;;
         step_ports)
             unset HICLAW_PORT_GATEWAY HICLAW_PORT_CONSOLE
-            unset HICLAW_PORT_ELEMENT_WEB HICLAW_PORT_OPENCLAW_CONSOLE
+            unset HICLAW_PORT_ELEMENT_WEB HICLAW_PORT_MANAGER_CONSOLE
             ;;
         step_domains)
             unset HICLAW_MATRIX_DOMAIN HICLAW_MATRIX_CLIENT_DOMAIN
@@ -1372,7 +1311,9 @@ clear_step_vars() {
         step_volume)    unset HICLAW_DATA_DIR ;;
         step_workspace) unset HICLAW_WORKSPACE_DIR ;;
         step_runtime)   unset HICLAW_DEFAULT_WORKER_RUNTIME ;;
+        step_manager_runtime) unset HICLAW_MANAGER_RUNTIME ;;
         step_e2ee)      unset HICLAW_MATRIX_E2EE ;;
+        step_docker_proxy) unset HICLAW_DOCKER_PROXY; unset HICLAW_PROXY_ALLOWED_REGISTRIES ;;
         step_idle)      unset HICLAW_WORKER_IDLE_TIMEOUT ;;
         step_hostshare) unset HICLAW_HOST_SHARE_DIR ;;
     esac
@@ -1427,6 +1368,59 @@ step_mode() {
             ;;
     esac
     log ""
+}
+
+step_version() {
+    # Skip if version already provided via env var
+    if [ -n "${HICLAW_VERSION}" ]; then
+        resolve_image_tags
+        return 0
+    fi
+    # Try to fetch the latest stable release from GitHub
+    log "$(msg install.version.fetching)"
+    local _fetched
+    _fetched=$(curl -sf --max-time 5 \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/alibaba/hiclaw/releases/latest" \
+        2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+    if [ -n "${_fetched}" ]; then
+        HICLAW_KNOWN_STABLE_VERSION="${_fetched}"
+    else
+        log "$(msg install.version.fetch_failed "${HICLAW_KNOWN_STABLE_VERSION}")"
+    fi
+    log "$(msg install.version.title)"
+    echo ""
+    echo "$(msg install.version.choose)"
+    echo "$(msg install.version.option_latest)"
+    printf "%s\n" "$(msg install.version.option_stable "${HICLAW_KNOWN_STABLE_VERSION}")"
+    echo "$(msg install.version.option_custom)"
+    echo ""
+    local VERSION_CHOICE
+    read -e -p "$(msg install.version.prompt) [1]: " VERSION_CHOICE
+    VERSION_CHOICE="${VERSION_CHOICE:-1}"
+    if [ "${VERSION_CHOICE}" = "b" ]; then STEP_RESULT="back"; return 0; fi
+    case "${VERSION_CHOICE}" in
+        1|latest)
+            HICLAW_VERSION="latest"
+            log "$(msg install.version.selected_latest)"
+            ;;
+        2|stable)
+            HICLAW_VERSION="${HICLAW_KNOWN_STABLE_VERSION}"
+            log "$(msg install.version.selected_stable "${HICLAW_VERSION}")"
+            ;;
+        3|custom)
+            local CUSTOM_VERSION
+            read -e -p "$(msg install.version.custom_prompt): " CUSTOM_VERSION
+            HICLAW_VERSION="${CUSTOM_VERSION:-${HICLAW_KNOWN_STABLE_VERSION}}"
+            log "$(msg install.version.selected_custom "${HICLAW_VERSION}")"
+            ;;
+        *)
+            HICLAW_VERSION="${HICLAW_KNOWN_STABLE_VERSION}"
+            log "$(msg install.version.invalid "${HICLAW_VERSION}")"
+            ;;
+    esac
+    log ""
+    resolve_image_tags
 }
 
 step_existing() {
@@ -1495,6 +1489,8 @@ step_existing() {
             echo -e "\033[31m$(msg install.reinstall.warn_env "${existing_env}")\033[0m"
             echo -e "\033[31m$(msg install.reinstall.warn_workspace "${existing_workspace}")\033[0m"
             echo -e "\033[31m$(msg install.reinstall.warn_workers)\033[0m"
+            echo -e "\033[31m$(msg install.reinstall.warn_proxy)\033[0m"
+            echo -e "\033[31m$(msg install.reinstall.warn_network)\033[0m"
             echo ""
             echo -e "\033[31m$(msg install.reinstall.confirm_type)\033[0m"
             echo -e "\033[31m  ${existing_workspace}\033[0m"
@@ -1512,6 +1508,15 @@ step_existing() {
                 ${DOCKER_CMD} rm "${w}" 2>/dev/null || true
                 log "$(msg install.reinstall.removed_worker "${w}")"
             done
+            if ${DOCKER_CMD} ps -a --format '{{.Names}}' | grep -q "^hiclaw-docker-proxy$"; then
+                log "$(msg install.reinstall.removing_proxy)"
+                ${DOCKER_CMD} stop hiclaw-docker-proxy 2>/dev/null || true
+                ${DOCKER_CMD} rm hiclaw-docker-proxy 2>/dev/null || true
+            fi
+            if ${DOCKER_CMD} network ls --format '{{.Name}}' | grep -q "^hiclaw-net$"; then
+                log "$(msg install.reinstall.removing_network)"
+                ${DOCKER_CMD} network rm hiclaw-net 2>/dev/null || true
+            fi
             if ${DOCKER_CMD} volume ls -q | grep -q "^hiclaw-data$"; then
                 log "$(msg install.reinstall.removing_volume)"
                 ${DOCKER_CMD} volume rm hiclaw-data 2>/dev/null || log "$(msg install.reinstall.warn_volume_fail)"
@@ -1555,6 +1560,7 @@ step_llm() {
         log "$(msg llm.provider.qwen_default "${HICLAW_LLM_PROVIDER}")"
         log "$(msg llm.model.default "${HICLAW_DEFAULT_MODEL}")"
         prompt HICLAW_LLM_API_KEY "$(msg llm.apikey_prompt)" "" "true"
+        HICLAW_EMBEDDING_MODEL="${HICLAW_EMBEDDING_MODEL-text-embedding-v4}"
         return 0
     fi
     echo ""
@@ -1691,6 +1697,53 @@ step_llm() {
             error "$(msg llm.provider.invalid "${PROVIDER_CHOICE}")"
             ;;
     esac
+    # --- Embedding model (optional, auto-tested) ---
+    echo ""
+    log "$(msg llm.embedding.title)"
+    log "$(msg llm.embedding.hint)"
+    echo ""
+    echo "$(msg llm.embedding.option.default)"
+    echo "$(msg llm.embedding.option.custom)"
+    echo "$(msg llm.embedding.option.disable)"
+    echo ""
+    local EMB_CHOICE
+    read -e -p "$(msg llm.embedding.select) [1]: " EMB_CHOICE
+    EMB_CHOICE="${EMB_CHOICE:-1}"
+    if [ "${EMB_CHOICE}" = "b" ]; then STEP_RESULT="back"; return 0; fi
+
+    case "${EMB_CHOICE}" in
+        1)
+            HICLAW_EMBEDDING_MODEL="text-embedding-v4"
+            ;;
+        2)
+            read -e -p "$(msg llm.embedding.custom_prompt): " HICLAW_EMBEDDING_MODEL
+            if [ "${HICLAW_EMBEDDING_MODEL}" = "b" ]; then STEP_RESULT="back"; return 0; fi
+            if [ -z "${HICLAW_EMBEDDING_MODEL}" ]; then
+                HICLAW_EMBEDDING_MODEL=""
+                log "$(msg llm.embedding.disabled)"
+            fi
+            ;;
+        3)
+            HICLAW_EMBEDDING_MODEL=""
+            log "$(msg llm.embedding.disabled)"
+            ;;
+        *)
+            HICLAW_EMBEDDING_MODEL="text-embedding-v4"
+            ;;
+    esac
+
+    if [ -n "${HICLAW_EMBEDDING_MODEL}" ]; then
+        # Qwen provider uses dashscope directly; others use OPENAI_BASE_URL
+        local EMB_BASE_URL="${HICLAW_OPENAI_BASE_URL}"
+        if [ "${HICLAW_LLM_PROVIDER}" = "qwen" ]; then
+            EMB_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+        fi
+        if ! test_embedding_connectivity "${EMB_BASE_URL}" "${HICLAW_LLM_API_KEY}" "${HICLAW_EMBEDDING_MODEL}"; then
+            HICLAW_EMBEDDING_MODEL=""
+            log "$(msg llm.embedding.auto_disabled)"
+        fi
+    fi
+
     export HICLAW_LLM_PROVIDER HICLAW_DEFAULT_MODEL
     [ -n "${HICLAW_OPENAI_BASE_URL+x}" ] && export HICLAW_OPENAI_BASE_URL
     log ""
@@ -1706,7 +1759,7 @@ step_admin() {
             log "$(msg admin.password_generated)"
         fi
     else
-        log "  $(msg prompt.preset "HICLAW_ADMIN_PASSWORD")"
+        log "  $(msg prompt.preset "$(msg admin.password_prompt)")"
     fi
     if [ ${#HICLAW_ADMIN_PASSWORD} -lt 8 ]; then
         error "$(msg admin.password_too_short "${#HICLAW_ADMIN_PASSWORD}")"
@@ -1747,7 +1800,7 @@ step_ports() {
     prompt HICLAW_PORT_GATEWAY "$(msg port.gateway_prompt)" "18080" || return 0
     prompt HICLAW_PORT_CONSOLE "$(msg port.console_prompt)" "18001" || return 0
     prompt HICLAW_PORT_ELEMENT_WEB "$(msg port.element_prompt)" "18088" || return 0
-    prompt HICLAW_PORT_OPENCLAW_CONSOLE "$(msg port.openclaw_console_prompt)" "18888" || return 0
+    prompt HICLAW_PORT_MANAGER_CONSOLE "$(msg port.manager_console_prompt)" "18888" || return 0
     log ""
 }
 
@@ -1758,7 +1811,9 @@ step_domains() {
     prompt HICLAW_MATRIX_CLIENT_DOMAIN "$(msg domain.element_prompt)" "matrix-client-local.hiclaw.io" || return 0
     prompt HICLAW_AI_GATEWAY_DOMAIN "$(msg domain.gateway_prompt)" "aigw-local.hiclaw.io" || return 0
     prompt HICLAW_FS_DOMAIN "$(msg domain.fs_prompt)" "fs-local.hiclaw.io" || return 0
-    prompt HICLAW_CONSOLE_DOMAIN "$(msg domain.console_prompt)" "console-local.hiclaw.io" || return 0
+    if [ "${HICLAW_MANAGER_RUNTIME}" != "copaw" ]; then
+        prompt HICLAW_CONSOLE_DOMAIN "$(msg domain.console_prompt)" "console-local.hiclaw.io" || return 0
+    fi
     log ""
 }
 
@@ -1810,7 +1865,7 @@ step_runtime() {
     if [ "${HICLAW_NON_INTERACTIVE}" = "1" ]; then
         HICLAW_DEFAULT_WORKER_RUNTIME="${HICLAW_DEFAULT_WORKER_RUNTIME:-openclaw}"
     elif [ "${HICLAW_UPGRADE}" = "1" ] && [ -n "${HICLAW_DEFAULT_WORKER_RUNTIME}" ]; then
-        log "$(msg prompt.upgrade_keep "HICLAW_DEFAULT_WORKER_RUNTIME" "${HICLAW_DEFAULT_WORKER_RUNTIME}")"
+        log "$(msg prompt.upgrade_keep "$(msg worker_runtime.title_short)" "${HICLAW_DEFAULT_WORKER_RUNTIME}")"
         local _runtime_choice
         read -e -p "$(msg worker_runtime.choice): " _runtime_choice
         if [ "${_runtime_choice}" = "b" ]; then STEP_RESULT="back"; return 0; fi
@@ -1834,6 +1889,39 @@ step_runtime() {
     log "$(msg worker_runtime.selected "${HICLAW_DEFAULT_WORKER_RUNTIME}")"
 }
 
+step_manager_runtime() {
+    log "$(msg manager_runtime.title)"
+    echo ""
+    echo "  1) $(msg manager_runtime.openclaw)"
+    echo "  2) $(msg manager_runtime.copaw)"
+    echo ""
+    if [ "${HICLAW_NON_INTERACTIVE}" = "1" ]; then
+        HICLAW_MANAGER_RUNTIME="${HICLAW_MANAGER_RUNTIME:-openclaw}"
+    elif [ "${HICLAW_UPGRADE}" = "1" ] && [ -n "${HICLAW_MANAGER_RUNTIME}" ]; then
+        log "$(msg prompt.upgrade_keep "$(msg manager_runtime.title_short)" "${HICLAW_MANAGER_RUNTIME}")"
+        local _runtime_choice
+        read -e -p "$(msg manager_runtime.choice): " _runtime_choice
+        if [ "${_runtime_choice}" = "b" ]; then STEP_RESULT="back"; return 0; fi
+        if [ -n "${_runtime_choice}" ]; then
+            case "${_runtime_choice}" in
+                2) HICLAW_MANAGER_RUNTIME="copaw" ;;
+                *) HICLAW_MANAGER_RUNTIME="openclaw" ;;
+            esac
+        fi
+    elif [ -z "${HICLAW_MANAGER_RUNTIME+x}" ]; then
+        local _runtime_choice
+        read -e -p "$(msg manager_runtime.choice): " _runtime_choice
+        if [ "${_runtime_choice}" = "b" ]; then STEP_RESULT="back"; return 0; fi
+        _runtime_choice="${_runtime_choice:-1}"
+        case "${_runtime_choice}" in
+            2) HICLAW_MANAGER_RUNTIME="copaw" ;;
+            *) HICLAW_MANAGER_RUNTIME="openclaw" ;;
+        esac
+    fi
+    export HICLAW_MANAGER_RUNTIME
+    log "$(msg manager_runtime.selected "${HICLAW_MANAGER_RUNTIME}")"
+}
+
 step_e2ee() {
     log ""
     log "$(msg matrix_e2ee.title)"
@@ -1844,7 +1932,8 @@ step_e2ee() {
     echo "  2) $(msg matrix_e2ee.enable)"
     echo ""
     if [ "${HICLAW_UPGRADE}" = "1" ] && [ -n "${HICLAW_MATRIX_E2EE}" ]; then
-        log "$(msg prompt.upgrade_keep "HICLAW_MATRIX_E2EE" "${HICLAW_MATRIX_E2EE}")"
+        local _e2ee_display; if [ "${HICLAW_MATRIX_E2EE}" = "1" ]; then _e2ee_display="$(msg matrix_e2ee.val_enabled)"; else _e2ee_display="$(msg matrix_e2ee.val_disabled)"; fi
+        log "$(msg prompt.upgrade_keep "$(msg matrix_e2ee.title_short)" "${_e2ee_display}")"
         local _e2ee_choice
         read -e -p "$(msg matrix_e2ee.choice): " _e2ee_choice
         if [ "${_e2ee_choice}" = "b" ]; then STEP_RESULT="back"; return 0; fi
@@ -1873,9 +1962,74 @@ step_e2ee() {
     fi
 }
 
+step_docker_proxy() {
+    # Only relevant when socket mounting is enabled
+    if [ "${HICLAW_MOUNT_SOCKET}" != "1" ]; then
+        HICLAW_DOCKER_PROXY="0"
+        return 0
+    fi
+
+    echo ""
+    echo -e "  \033[1m$(msg docker_proxy.title)\033[0m"
+    echo ""
+    echo -e "  $(msg docker_proxy.desc)"
+    echo ""
+    echo "  1) $(msg docker_proxy.enable)"
+    echo "  2) $(msg docker_proxy.disable)"
+    echo ""
+
+    if [ "${HICLAW_UPGRADE}" = "1" ] && [ -n "${HICLAW_DOCKER_PROXY}" ]; then
+        local _proxy_display; if [ "${HICLAW_DOCKER_PROXY}" = "1" ]; then _proxy_display="$(msg docker_proxy.val_enabled)"; else _proxy_display="$(msg docker_proxy.val_disabled)"; fi
+        log "$(msg prompt.upgrade_keep "$(msg docker_proxy.title_short)" "${_proxy_display}")"
+        local _choice
+        read -e -p "$(msg docker_proxy.choice): " _choice
+        if [ "${_choice}" = "b" ]; then STEP_RESULT="back"; return 0; fi
+        if [ -n "${_choice}" ]; then
+            case "${_choice}" in
+                2) HICLAW_DOCKER_PROXY="0" ;;
+                *) HICLAW_DOCKER_PROXY="1" ;;
+            esac
+        fi
+    elif [ -z "${HICLAW_DOCKER_PROXY+x}" ]; then
+        local _choice
+        read -e -p "$(msg docker_proxy.choice): " _choice
+        if [ "${_choice}" = "b" ]; then STEP_RESULT="back"; return 0; fi
+        _choice="${_choice:-1}"
+        case "${_choice}" in
+            2) HICLAW_DOCKER_PROXY="0" ;;
+            *) HICLAW_DOCKER_PROXY="1" ;;
+        esac
+    fi
+    HICLAW_DOCKER_PROXY="${HICLAW_DOCKER_PROXY:-1}"
+    export HICLAW_DOCKER_PROXY
+    if [ "${HICLAW_DOCKER_PROXY}" = "1" ]; then
+        log "$(msg docker_proxy.selected_enabled)"
+
+        # Prompt for additional allowed image sources
+        echo ""
+        echo -e "  $(msg docker_proxy.registries_desc)"
+        echo ""
+        if [ "${HICLAW_UPGRADE}" = "1" ] && [ -n "${HICLAW_PROXY_ALLOWED_REGISTRIES}" ]; then
+            log "$(msg prompt.upgrade_keep "$(msg docker_proxy.registries_label)" "${HICLAW_PROXY_ALLOWED_REGISTRIES}")"
+            local _reg_input
+            read -e -p "$(msg docker_proxy.registries_prompt): " _reg_input
+            if [ "${_reg_input}" = "b" ]; then STEP_RESULT="back"; return 0; fi
+            [ -n "${_reg_input}" ] && HICLAW_PROXY_ALLOWED_REGISTRIES="${_reg_input}"
+        elif [ -z "${HICLAW_PROXY_ALLOWED_REGISTRIES+x}" ]; then
+            local _reg_input
+            read -e -p "$(msg docker_proxy.registries_prompt): " _reg_input
+            if [ "${_reg_input}" = "b" ]; then STEP_RESULT="back"; return 0; fi
+            HICLAW_PROXY_ALLOWED_REGISTRIES="${_reg_input:-}"
+        fi
+        export HICLAW_PROXY_ALLOWED_REGISTRIES
+    else
+        log "$(msg docker_proxy.selected_disabled)"
+    fi
+}
+
 step_idle() {
     if [ "${HICLAW_UPGRADE}" = "1" ] && [ -n "${HICLAW_WORKER_IDLE_TIMEOUT}" ]; then
-        log "$(msg prompt.upgrade_keep "HICLAW_WORKER_IDLE_TIMEOUT" "${HICLAW_WORKER_IDLE_TIMEOUT}")"
+        log "$(msg prompt.upgrade_keep "$(msg idle_timeout.label)" "${HICLAW_WORKER_IDLE_TIMEOUT}")"
         local _idle_timeout
         read -e -p "$(msg idle_timeout.prompt): " _idle_timeout
         if [ "${_idle_timeout}" = "b" ]; then STEP_RESULT="back"; return 0; fi
@@ -1911,6 +2065,13 @@ install_manager() {
     log "$(msg install.dir_hint)"
     log "$(msg install.dir_hint2)"
     log ""
+
+    # Non-interactive fallback: resolve version immediately so image tags are available
+    # before the step state machine runs. Interactive mode lets step_version handle it.
+    if [ "${HICLAW_NON_INTERACTIVE}" = "1" ]; then
+        HICLAW_VERSION="${HICLAW_VERSION:-${HICLAW_KNOWN_STABLE_VERSION}}"
+        resolve_image_tags
+    fi
 
     # Migrate legacy env file location before checks
     local existing_env="${HICLAW_ENV_FILE:-${HOME}/hiclaw-manager.env}"
@@ -1967,9 +2128,9 @@ install_manager() {
     fi
 
     # ── State machine ─────────────────────────────────────────────────────────
-    local _STEPS=( step_lang step_mode step_existing step_llm step_admin step_network \
+    local _STEPS=( step_lang step_mode step_version step_existing step_llm step_admin step_network \
                    step_ports step_domains step_github step_skills step_volume \
-                   step_workspace step_runtime step_e2ee step_idle step_hostshare )
+                   step_workspace step_manager_runtime step_runtime step_e2ee step_docker_proxy step_idle step_hostshare )
     local _STEP_HISTORY=()
     local _step_idx=0
     while [ "${_step_idx}" -lt "${#_STEPS[@]}" ]; do
@@ -2006,6 +2167,8 @@ install_manager() {
     fi
     HICLAW_WORKSPACE_DIR="$(cd "${HICLAW_WORKSPACE_DIR}" 2>/dev/null && pwd || echo "${HICLAW_WORKSPACE_DIR}")"
     mkdir -p "${HICLAW_WORKSPACE_DIR}"
+    HICLAW_MANAGER_RUNTIME="${HICLAW_MANAGER_RUNTIME:-openclaw}"
+    export HICLAW_MANAGER_RUNTIME
     HICLAW_DEFAULT_WORKER_RUNTIME="${HICLAW_DEFAULT_WORKER_RUNTIME:-openclaw}"
     HICLAW_MATRIX_E2EE="${HICLAW_MATRIX_E2EE:-0}"
     export HICLAW_MATRIX_E2EE
@@ -2023,6 +2186,13 @@ install_manager() {
     HICLAW_MINIO_USER="${HICLAW_MINIO_USER:-${HICLAW_ADMIN_USER}}"
     HICLAW_MINIO_PASSWORD="${HICLAW_MINIO_PASSWORD:-${HICLAW_ADMIN_PASSWORD}}"
     HICLAW_MANAGER_GATEWAY_KEY="${HICLAW_MANAGER_GATEWAY_KEY:-$(generate_key)}"
+
+    # Detect Apple Silicon (M1/M2/M3/M4) - need JVM fix for Higress Console
+    # See: https://github.com/agentscope-ai/HiClaw/issues/249
+    if [ -z "${JVM_ARGS:-}" ] && [ "$(uname -m)" = "arm64" ] && [ "$(uname -s)" = "Darwin" ]; then
+        log "Apple Silicon detected - setting JVM_ARGS to fix Higress Console SIGILL issue"
+        JVM_ARGS="-XX:+UnlockDiagnosticVMOptions -XX:-UseAESCTRIntrinsics -XX:UseSVE=0"
+    fi
 
     # Write .env file
     ENV_FILE="${HICLAW_ENV_FILE:-${HOME}/hiclaw-manager.env}"
@@ -2043,6 +2213,9 @@ HICLAW_MODEL_MAX_TOKENS=${HICLAW_MODEL_MAX_TOKENS:-}
 HICLAW_MODEL_REASONING=${HICLAW_MODEL_REASONING:-}
 HICLAW_MODEL_VISION=${HICLAW_MODEL_VISION:-}
 
+# Embedding model (empty = disabled, default: text-embedding-v4)
+HICLAW_EMBEDDING_MODEL=${HICLAW_EMBEDDING_MODEL}
+
 # Admin
 HICLAW_ADMIN_USER=${HICLAW_ADMIN_USER}
 HICLAW_ADMIN_PASSWORD=${HICLAW_ADMIN_PASSWORD}
@@ -2052,7 +2225,10 @@ HICLAW_LOCAL_ONLY=${HICLAW_LOCAL_ONLY}
 HICLAW_PORT_GATEWAY=${HICLAW_PORT_GATEWAY}
 HICLAW_PORT_CONSOLE=${HICLAW_PORT_CONSOLE}
 HICLAW_PORT_ELEMENT_WEB=${HICLAW_PORT_ELEMENT_WEB}
-HICLAW_PORT_OPENCLAW_CONSOLE=${HICLAW_PORT_OPENCLAW_CONSOLE:-18888}
+HICLAW_PORT_MANAGER_CONSOLE=${HICLAW_PORT_MANAGER_CONSOLE:-18888}
+
+# Manager runtime (openclaw | copaw)
+HICLAW_MANAGER_RUNTIME=${HICLAW_MANAGER_RUNTIME:-openclaw}
 
 # Matrix
 HICLAW_MATRIX_DOMAIN=${HICLAW_MATRIX_DOMAIN}
@@ -2075,8 +2251,23 @@ HICLAW_REGISTRATION_TOKEN=${HICLAW_REGISTRATION_TOKEN}
 # GitHub (optional)
 HICLAW_GITHUB_TOKEN=${HICLAW_GITHUB_TOKEN:-}
 
-# Skills Registry (optional, default: https://skills.sh)
-HICLAW_SKILLS_API_URL=${HICLAW_SKILLS_API_URL:-}
+# Nacos package import defaults
+HICLAW_NACOS_REGISTRY_URI=${HICLAW_NACOS_REGISTRY_URI:-nacos://market.hiclaw.io:80/public}
+HICLAW_NACOS_USERNAME=${HICLAW_NACOS_USERNAME:-}
+HICLAW_NACOS_PASSWORD=${HICLAW_NACOS_PASSWORD:-}
+HICLAW_NACOS_TOKEN=${HICLAW_NACOS_TOKEN:-}
+
+# Skills Registry (optional, default: nacos://market.hiclaw.io:80/public)
+HICLAW_SKILLS_API_URL=${HICLAW_SKILLS_API_URL:-nacos://market.hiclaw.io:80/public}
+
+# OpenClaw CMS plugin (optional)
+HICLAW_CMS_TRACES_ENABLED=${HICLAW_CMS_TRACES_ENABLED:-false}
+HICLAW_CMS_ENDPOINT=${HICLAW_CMS_ENDPOINT:-}
+HICLAW_CMS_LICENSE_KEY=${HICLAW_CMS_LICENSE_KEY:-}
+HICLAW_CMS_PROJECT=${HICLAW_CMS_PROJECT:-}
+HICLAW_CMS_WORKSPACE=${HICLAW_CMS_WORKSPACE:-}
+HICLAW_CMS_SERVICE_NAME=${HICLAW_CMS_SERVICE_NAME:-hiclaw-manager}
+HICLAW_CMS_METRICS_ENABLED=${HICLAW_CMS_METRICS_ENABLED:-false}
 
 # Worker images (for direct container creation)
 HICLAW_WORKER_IMAGE=${WORKER_IMAGE}
@@ -2088,8 +2279,17 @@ HICLAW_DEFAULT_WORKER_RUNTIME=${HICLAW_DEFAULT_WORKER_RUNTIME:-openclaw}
 # Matrix E2EE (0=disabled, 1=enabled; default: 0)
 HICLAW_MATRIX_E2EE=${HICLAW_MATRIX_E2EE:-0}
 
+# Docker API proxy (0=disabled, 1=enabled; default: 1)
+HICLAW_DOCKER_PROXY=${HICLAW_DOCKER_PROXY:-1}
+
+# Docker API proxy: additional allowed image sources (comma-separated)
+HICLAW_PROXY_ALLOWED_REGISTRIES=${HICLAW_PROXY_ALLOWED_REGISTRIES:-}
+
 # Worker idle timeout in minutes (default: 720 = 12 hours)
 HICLAW_WORKER_IDLE_TIMEOUT=${HICLAW_WORKER_IDLE_TIMEOUT:-720}
+
+# JVM Args for Higress Console (fixes SIGILL on Apple Silicon)
+JVM_ARGS=${JVM_ARGS:-}
 
 # Higress WASM plugin image registry (auto-selected by timezone)
 HIGRESS_ADMIN_WASM_PLUGIN_IMAGE_REGISTRY=${HICLAW_REGISTRY}
@@ -2180,14 +2380,28 @@ EOF
         ${DOCKER_CMD} pull "${_img}"
     }
 
-    # Manager image is always required
-    _pull_image "${MANAGER_IMAGE}" "install.image.exists" "install.image.pulling_manager"
+    # Manager image is always required (select based on runtime)
+    if [ "${HICLAW_MANAGER_RUNTIME}" = "copaw" ]; then
+        _pull_image "${MANAGER_COPAW_IMAGE}" "install.image.exists" "install.image.pulling_manager"
+    else
+        _pull_image "${MANAGER_IMAGE}" "install.image.exists" "install.image.pulling_manager"
+    fi
 
     # Pull worker image for the selected runtime
     if [ "${HICLAW_DEFAULT_WORKER_RUNTIME}" = "copaw" ]; then
         _pull_image "${COPAW_WORKER_IMAGE}" "install.image.worker_exists" "install.image.pulling_worker"
     else
         _pull_image "${WORKER_IMAGE}" "install.image.worker_exists" "install.image.pulling_worker"
+    fi
+
+    # Always pull copaw worker image — team workers require copaw runtime
+    if [ "${HICLAW_DEFAULT_WORKER_RUNTIME}" != "copaw" ]; then
+        if ${DOCKER_CMD} image inspect "${COPAW_WORKER_IMAGE}" >/dev/null 2>&1; then
+            log "$(msg "install.image.worker_exists" "${COPAW_WORKER_IMAGE}")"
+        else
+            _pull_image "${COPAW_WORKER_IMAGE}" "install.image.worker_exists" "install.image.pulling_worker" || \
+                log "Warning: copaw worker image not available, team features may not work"
+        fi
     fi
 
     # During upgrade, also pull the other worker image if containers using it exist locally.
@@ -2198,16 +2412,20 @@ EOF
             if ${DOCKER_CMD} image inspect "${WORKER_IMAGE}" >/dev/null 2>&1; then
                 _pull_image "${WORKER_IMAGE}" "install.image.worker_exists" "install.image.pulling_worker"
             fi
-        else
-            # Selected openclaw, check if any copaw worker image exists locally
-            if ${DOCKER_CMD} image inspect "${COPAW_WORKER_IMAGE}" >/dev/null 2>&1; then
-                _pull_image "${COPAW_WORKER_IMAGE}" "install.image.worker_exists" "install.image.pulling_worker"
-            fi
         fi
+    fi
+
+    # Resolve and pull docker-proxy image (probes versioned tag, falls back to latest)
+    if [ "${HICLAW_DOCKER_PROXY:-0}" = "1" ]; then
+        resolve_docker_proxy_image
     fi
 
     # Stop and remove existing containers (deferred from upgrade detection
     # so that all configuration is collected and images are pulled first)
+    if ${DOCKER_CMD} ps -a --format '{{.Names}}' | grep -q "^hiclaw-docker-proxy$"; then
+        ${DOCKER_CMD} stop hiclaw-docker-proxy 2>/dev/null || true
+        ${DOCKER_CMD} rm hiclaw-docker-proxy 2>/dev/null || true
+    fi
     if ${DOCKER_CMD} ps -a --format '{{.Names}}' | grep -q "^hiclaw-manager$"; then
         log "$(msg install.removing_existing)"
         ${DOCKER_CMD} stop hiclaw-manager 2>/dev/null || true
@@ -2227,6 +2445,42 @@ EOF
 
     # Run Manager container
     log "$(msg install.starting_manager)"
+
+    # Ensure hiclaw-net Docker network exists; Manager joins it so workers can reach
+    # Manager services via Docker DNS (using the network aliases added below).
+    NETWORK_ARGS=""
+    NETWORK_ALIAS_ARGS=""
+    if [ -n "${CONTAINER_SOCK:-}" ] || [ "${HICLAW_DOCKER_PROXY:-0}" = "1" ]; then
+        ${DOCKER_CMD} network inspect hiclaw-net >/dev/null 2>&1 || ${DOCKER_CMD} network create hiclaw-net
+        NETWORK_ARGS="--network hiclaw-net"
+        # Workers hardcode these three internal domains to reach manager services,
+        # so they must always be network aliases regardless of user domain config.
+        NETWORK_ALIAS_ARGS="--network-alias matrix-local.hiclaw.io --network-alias aigw-local.hiclaw.io --network-alias fs-local.hiclaw.io"
+        # Also alias any *-local.hiclaw.io user-configured domains that differ from the fixed ones above.
+        for _domain in "${HICLAW_MATRIX_CLIENT_DOMAIN}" "${HICLAW_CONSOLE_DOMAIN}"; do
+            if [[ "${_domain}" == *-local.hiclaw.io ]]; then
+                NETWORK_ALIAS_ARGS="${NETWORK_ALIAS_ARGS} --network-alias ${_domain}"
+            fi
+        done
+    fi
+
+    # Start Docker API proxy if enabled (security layer between Manager and Docker daemon)
+    PROXY_ARGS=""
+    if [ "${HICLAW_DOCKER_PROXY:-0}" = "1" ] && [ -n "${CONTAINER_SOCK:-}" ]; then
+        local _proxy_image="${DOCKER_PROXY_IMAGE}"
+        log "Starting Docker API proxy..."
+        ${DOCKER_CMD} run -d \
+            --name hiclaw-docker-proxy \
+            --network hiclaw-net \
+            -v "${CONTAINER_SOCK}:/var/run/docker.sock" \
+            --security-opt label=disable \
+            ${HICLAW_PROXY_ALLOWED_REGISTRIES:+-e HICLAW_PROXY_ALLOWED_REGISTRIES="${HICLAW_PROXY_ALLOWED_REGISTRIES}"} \
+            --restart unless-stopped \
+            "${_proxy_image}"
+        PROXY_ARGS="-e HICLAW_CONTAINER_API=http://hiclaw-docker-proxy:2375"
+        SOCKET_MOUNT_ARGS=""  # Manager no longer needs direct socket access
+    fi
+
     # Build port binding args (127.0.0.1 prefix for local-only mode)
     if [ "${HICLAW_LOCAL_ONLY:-1}" = "1" ]; then
         _port_prefix="127.0.0.1:"
@@ -2240,18 +2494,23 @@ EOF
         -e HOME=/root/manager-workspace \
         -w /root/manager-workspace \
         -e HOST_ORIGINAL_HOME="${HICLAW_HOST_SHARE_DIR}" \
+        -e HICLAW_MANAGER_RUNTIME="${HICLAW_MANAGER_RUNTIME:-openclaw}" \
+        ${JVM_ARGS:+-e JVM_ARGS="${JVM_ARGS}"} \
         ${YOLO_ARGS} \
         ${TZ_ARGS} \
         ${SOCKET_MOUNT_ARGS} \
+        ${NETWORK_ARGS} \
+        ${NETWORK_ALIAS_ARGS} \
+        ${PROXY_ARGS} \
         -p "${_port_prefix}${HICLAW_PORT_GATEWAY}:8080" \
         -p "${_port_prefix}${HICLAW_PORT_CONSOLE}:8001" \
         -p "${_port_prefix}${HICLAW_PORT_ELEMENT_WEB:-18088}:8088" \
-        -p "127.0.0.1:${HICLAW_PORT_OPENCLAW_CONSOLE:-18888}:18888" \
+        -p "127.0.0.1:${HICLAW_PORT_MANAGER_CONSOLE:-18888}:18888" \
         ${DATA_MOUNT_ARGS} \
         ${WORKSPACE_MOUNT_ARGS} \
         ${HOST_SHARE_MOUNT_ARGS} \
         --restart unless-stopped \
-        "${MANAGER_IMAGE}"
+        "$([ "${HICLAW_MANAGER_RUNTIME}" = "copaw" ] && echo "${MANAGER_COPAW_IMAGE}" || echo "${MANAGER_IMAGE}")"
     unset _port_prefix
 
     # Wait for Manager agent to be ready
@@ -2260,12 +2519,14 @@ EOF
     # Wait for Matrix server to be ready
     wait_matrix_ready "hiclaw-manager"
 
-    # Send welcome message to Manager (skipped automatically if soul-configured marker exists)
-    send_welcome_message
-
-    # Ensure admin DM room ID is persisted in state.json
-    # Covers both fresh install (room just created) and upgrade (room exists but state.json missing it)
-    ensure_admin_dm_room "hiclaw-manager"
+    # Post-install verification (non-fatal: warnings only)
+    local _verify_script
+    _verify_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hiclaw-verify.sh"
+    if [ -f "${_verify_script}" ]; then
+        bash "${_verify_script}" "hiclaw-manager" || {
+            log "WARNING: Some post-install checks failed. Re-run: bash install/hiclaw-verify.sh"
+        }
+    fi
 
     log ""
     log "$(msg success.title)"
@@ -2310,8 +2571,8 @@ EOF
     log ""
     log "$(msg success.other_consoles)"
     log "$(msg success.higress_console "${HICLAW_PORT_CONSOLE}" "${HICLAW_ADMIN_USER}" "${HICLAW_ADMIN_PASSWORD}")"
-    log "$(msg success.openclaw_console "${HICLAW_PORT_OPENCLAW_CONSOLE:-18888}")"
-    log "$(msg success.openclaw_console_gateway "${HICLAW_ADMIN_USER}" "${HICLAW_ADMIN_PASSWORD}")"
+    log "$(msg success.manager_console "${HICLAW_PORT_MANAGER_CONSOLE:-18888}")"
+    log "$(msg success.manager_console_gateway "${HICLAW_ADMIN_USER}" "${HICLAW_ADMIN_PASSWORD}")"
     log ""
     log "$(msg success.switch_llm.title)"
     log "$(msg success.switch_llm.hint)"
@@ -2385,10 +2646,25 @@ install_worker() {
     DOCKER_ENV="${DOCKER_ENV} -e HICLAW_FS_ACCESS_KEY=${FS_KEY}"
     DOCKER_ENV="${DOCKER_ENV} -e HICLAW_FS_SECRET_KEY=${FS_SECRET}"
 
+    if [ -z "${SKILLS_API_URL}" ]; then
+        if [ -n "${HICLAW_SKILLS_API_URL:-}" ]; then
+            SKILLS_API_URL="${HICLAW_SKILLS_API_URL}"
+        else
+            SKILLS_API_URL="nacos://market.hiclaw.io:80/public"
+        fi
+    fi
+
     # Add SKILLS_API_URL if specified
-    if [ -n "${SKILLS_API_URL}" ]; then
-        DOCKER_ENV="${DOCKER_ENV} -e SKILLS_API_URL=${SKILLS_API_URL}"
-        log "$(msg worker.skills_url "${SKILLS_API_URL}")"
+    DOCKER_ENV="${DOCKER_ENV} -e SKILLS_API_URL=${SKILLS_API_URL}"
+    log "$(msg worker.skills_url "${SKILLS_API_URL}")"
+    if [ -n "${HICLAW_NACOS_USERNAME:-}" ]; then
+        DOCKER_ENV="${DOCKER_ENV} -e HICLAW_NACOS_USERNAME=${HICLAW_NACOS_USERNAME}"
+    fi
+    if [ -n "${HICLAW_NACOS_PASSWORD:-}" ]; then
+        DOCKER_ENV="${DOCKER_ENV} -e HICLAW_NACOS_PASSWORD=${HICLAW_NACOS_PASSWORD}"
+    fi
+    if [ -n "${HICLAW_NACOS_TOKEN:-}" ]; then
+        DOCKER_ENV="${DOCKER_ENV} -e HICLAW_NACOS_TOKEN=${HICLAW_NACOS_TOKEN}"
     fi
 
     # shellcheck disable=SC2086
@@ -2453,6 +2729,35 @@ test_llm_connectivity() {
                 exit 1
             fi
         fi
+    fi
+}
+
+test_embedding_connectivity() {
+    local base_url="$1"
+    local api_key="$2"
+    local model="$3"
+    if ! command -v curl >/dev/null 2>&1; then
+        return 0
+    fi
+    log "$(msg llm.embedding.test.testing)"
+    local _body _http_code _tmpfile
+    _tmpfile=$(mktemp)
+    _http_code=$(curl -s -o "${_tmpfile}" -w "%{http_code}" \
+        -X POST "${base_url%/}/embeddings" \
+        -H "Authorization: Bearer ${api_key}" \
+        -H "Content-Type: application/json" \
+        -H "User-Agent: HiClaw/${HICLAW_VERSION:-latest}" \
+        --max-time 30 \
+        -d "{\"model\":\"${model}\",\"input\":\"test\"}" \
+        2>/dev/null)
+    _body=$(cat "${_tmpfile}")
+    rm -f "${_tmpfile}"
+    if [ "${_http_code}" = "200" ] || [ "${_http_code}" = "201" ]; then
+        log "$(msg llm.embedding.test.ok)"
+        return 0
+    else
+        echo -e "\033[33m$(msg llm.embedding.test.fail "${_http_code}" "${_body}")\033[0m"
+        return 1
     fi
 }
 

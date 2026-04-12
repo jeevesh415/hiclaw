@@ -3,8 +3,26 @@
 # Supports both local (supervisord) and cloud (SAE single-process) deployments.
 # In local mode this is the last supervisord component to start (priority 800).
 # In cloud mode (HICLAW_RUNTIME=aliyun) this is the container entrypoint.
+#
+# Runtime selection:
+#   HICLAW_MANAGER_RUNTIME=openclaw (default) - OpenClaw gateway mode
+#   HICLAW_MANAGER_RUNTIME=copaw              - CoPaw workspace mode
 
 source /opt/hiclaw/scripts/lib/hiclaw-env.sh
+
+# ============================================================
+# Runtime selection
+# ============================================================
+MANAGER_RUNTIME="${HICLAW_MANAGER_RUNTIME:-openclaw}"
+case "${MANAGER_RUNTIME}" in
+    copaw)
+        log "Manager runtime: CoPaw (Python workspace)"
+        ;;
+    *)
+        log "Manager runtime: OpenClaw (Node.js gateway)"
+        MANAGER_RUNTIME="openclaw"
+        ;;
+esac
 
 # ============================================================
 # Set timezone from TZ env var
@@ -15,7 +33,7 @@ if [ -n "${TZ}" ] && [ -f "/usr/share/zoneinfo/${TZ}" ]; then
     log "Timezone set to ${TZ}"
 fi
 
-MATRIX_DOMAIN="${HICLAW_MATRIX_DOMAIN:-matrix-local.hiclaw.io:8080}"
+export MATRIX_DOMAIN="${HICLAW_MATRIX_DOMAIN:-matrix-local.hiclaw.io:8080}"
 AI_GATEWAY_DOMAIN="${HICLAW_AI_GATEWAY_DOMAIN:-aigw-local.hiclaw.io}"
 
 # ============================================================
@@ -150,7 +168,15 @@ fi
 # Local mode: wait for mc mirror initialization (shared + worker data in /root/hiclaw-fs/)
 if [ "${HICLAW_RUNTIME}" != "aliyun" ]; then
     log "Waiting for MinIO storage initialization..."
-    while [ ! -f /root/hiclaw-fs/.initialized ]; do sleep 2; done
+    _minio_wait=0
+    while [ ! -f /root/hiclaw-fs/.initialized ]; do
+        sleep 2
+        _minio_wait=$(( _minio_wait + 1 ))
+        if [ "${_minio_wait}" -ge 60 ]; then
+            log "ERROR: MinIO storage initialization timed out after 120s"
+            exit 1
+        fi
+    done
     log "MinIO storage initialized"
 fi
 
@@ -278,79 +304,112 @@ if [ "${HICLAW_RUNTIME}" != "aliyun" ]; then
 
     # Configure Higress routes, consumers, MCP servers
     /opt/hiclaw/scripts/init/setup-higress.sh
+fi
+
+# ============================================================
+# Create admin DM room, persist to state.json, send welcome message
+# Runs in both local and cloud modes (idempotent)
+# ============================================================
+MANAGER_FULL_ID="@manager:${MATRIX_DOMAIN}"
+ADMIN_FULL_ID="@${HICLAW_ADMIN_USER}:${MATRIX_DOMAIN}"
+
+log "Logging in as admin to create DM room..."
+_ADMIN_LOGIN=$(curl -sf -X POST "${HICLAW_MATRIX_SERVER}/_matrix/client/v3/login" \
+    -H 'Content-Type: application/json' \
+    -d '{
+        "type": "m.login.password",
+        "identifier": {"type": "m.id.user", "user": "'"${HICLAW_ADMIN_USER}"'"},
+        "password": "'"${HICLAW_ADMIN_PASSWORD}"'"
+    }' 2>&1) || true
+
+ADMIN_MATRIX_TOKEN=$(echo "${_ADMIN_LOGIN}" | jq -r '.access_token // empty' 2>/dev/null)
+if [ -z "${ADMIN_MATRIX_TOKEN}" ]; then
+    log "WARNING: Failed to login as admin, skipping DM room creation"
 else
-    # Cloud mode: create admin DM room and schedule welcome message
-    MANAGER_FULL_ID="@manager:${MATRIX_DOMAIN}"
-    ADMIN_FULL_ID="@${HICLAW_ADMIN_USER}:${MATRIX_DOMAIN}"
-
-    log "Logging in as admin to create DM room..."
-    _ADMIN_LOGIN=$(curl -sf -X POST "${HICLAW_MATRIX_SERVER}/_matrix/client/v3/login" \
-        -H 'Content-Type: application/json' \
-        -d '{
-            "type": "m.login.password",
-            "identifier": {"type": "m.id.user", "user": "'"${HICLAW_ADMIN_USER}"'"},
-            "password": "'"${HICLAW_ADMIN_PASSWORD}"'"
-        }' 2>&1) || true
-
-    ADMIN_MATRIX_TOKEN=$(echo "${_ADMIN_LOGIN}" | jq -r '.access_token // empty' 2>/dev/null)
-    if [ -z "${ADMIN_MATRIX_TOKEN}" ]; then
-        log "WARNING: Failed to login as admin, skipping DM room creation"
-    else
-        # Search for existing DM room with Manager (idempotent)
-        DM_ROOM_ID=""
-        _JOINED_ROOMS=$(curl -sf "${HICLAW_MATRIX_SERVER}/_matrix/client/v3/joined_rooms" \
+    # Search for existing DM room with Manager (idempotent)
+    DM_ROOM_ID=""
+    _JOINED_ROOMS=$(curl -sf "${HICLAW_MATRIX_SERVER}/_matrix/client/v3/joined_rooms" \
+        -H "Authorization: Bearer ${ADMIN_MATRIX_TOKEN}" 2>/dev/null \
+        | jq -r '.joined_rooms[]' 2>/dev/null) || true
+    for _rid in ${_JOINED_ROOMS}; do
+        _members=$(curl -sf "${HICLAW_MATRIX_SERVER}/_matrix/client/v3/rooms/${_rid}/members" \
             -H "Authorization: Bearer ${ADMIN_MATRIX_TOKEN}" 2>/dev/null \
-            | jq -r '.joined_rooms[]' 2>/dev/null) || true
-        for _rid in ${_JOINED_ROOMS}; do
-            _members=$(curl -sf "${HICLAW_MATRIX_SERVER}/_matrix/client/v3/rooms/${_rid}/members" \
-                -H "Authorization: Bearer ${ADMIN_MATRIX_TOKEN}" 2>/dev/null \
-                | jq -r '.chunk[].state_key' 2>/dev/null) || continue
-            _count=$(echo "${_members}" | wc -l | xargs)
-            if [ "${_count}" = "2" ] && echo "${_members}" | grep -q "@manager:"; then
-                DM_ROOM_ID="${_rid}"
-                break
-            fi
-        done
-
-        if [ -n "${DM_ROOM_ID}" ]; then
-            log "Existing DM room found: ${DM_ROOM_ID}"
-        else
-            log "Creating DM room with Manager..."
-            _RAW=$(curl -s -w '\nHTTP_CODE:%{http_code}' -X POST "${HICLAW_MATRIX_SERVER}/_matrix/client/v3/createRoom" \
-                -H "Authorization: Bearer ${ADMIN_MATRIX_TOKEN}" \
-                -H 'Content-Type: application/json' \
-                -d "{\"is_direct\":true,\"invite\":[\"${MANAGER_FULL_ID}\"],\"preset\":\"trusted_private_chat\"}" 2>&1) || true
-            _HTTP_CODE=$(echo "${_RAW}" | tail -1 | sed 's/HTTP_CODE://')
-            _CREATE_RESP=$(echo "${_RAW}" | sed '$d')
-            DM_ROOM_ID=$(echo "${_CREATE_RESP}" | jq -r '.room_id // empty' 2>/dev/null)
-            if [ -n "${DM_ROOM_ID}" ]; then
-                log "DM room created: ${DM_ROOM_ID}"
-            else
-                log "WARNING: Failed to create DM room (HTTP ${_HTTP_CODE}): ${_CREATE_RESP}"
-            fi
+            | jq -r '.chunk[].state_key' 2>/dev/null) || continue
+        _count=$(echo "${_members}" | wc -l | xargs)
+        if [ "${_count}" = "2" ] && echo "${_members}" | grep -q "@manager:"; then
+            DM_ROOM_ID="${_rid}"
+            break
         fi
+    done
 
-        # Schedule welcome message in background (only on first boot)
-        if [ -n "${DM_ROOM_ID}" ] && [ ! -f "/root/manager-workspace/soul-configured" ]; then
-            log "Scheduling welcome message (background, waiting for OpenClaw to start)..."
-            (
-                _HICLAW_LANGUAGE="${HICLAW_LANGUAGE:-zh}"
-                _HICLAW_TIMEZONE="${TZ:-Asia/Shanghai}"
-                _wait=0
-                _ready=false
-                while [ "${_wait}" -lt 300 ]; do
-                    if curl -sf http://127.0.0.1:18799/ > /dev/null 2>&1; then
-                        _ready=true
-                        break
-                    fi
-                    sleep 3
-                    _wait=$((_wait + 3))
-                done
-                if [ "${_ready}" != "true" ]; then
-                    echo "[cloud-manager] WARNING: OpenClaw gateway not ready within 300s, skipping welcome message"
-                    exit 0
+    if [ -n "${DM_ROOM_ID}" ]; then
+        log "Existing DM room found: ${DM_ROOM_ID}"
+    else
+        log "Creating DM room with Manager..."
+        _RAW=$(curl -s -w '\nHTTP_CODE:%{http_code}' -X POST "${HICLAW_MATRIX_SERVER}/_matrix/client/v3/createRoom" \
+            -H "Authorization: Bearer ${ADMIN_MATRIX_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"is_direct\":true,\"invite\":[\"${MANAGER_FULL_ID}\"],\"preset\":\"trusted_private_chat\"}" 2>&1) || true
+        _HTTP_CODE=$(echo "${_RAW}" | tail -1 | sed 's/HTTP_CODE://')
+        _CREATE_RESP=$(echo "${_RAW}" | sed '$d')
+        DM_ROOM_ID=$(echo "${_CREATE_RESP}" | jq -r '.room_id // empty' 2>/dev/null)
+        if [ -n "${DM_ROOM_ID}" ]; then
+            log "DM room created: ${DM_ROOM_ID}"
+        else
+            log "WARNING: Failed to create DM room (HTTP ${_HTTP_CODE}): ${_CREATE_RESP}"
+        fi
+    fi
+
+    # Persist admin DM room ID to state.json
+    if [ -n "${DM_ROOM_ID}" ]; then
+        STATE_SCRIPT="/opt/hiclaw/agent/skills/task-management/scripts/manage-state.sh"
+        if [ -f "${STATE_SCRIPT}" ]; then
+            bash "${STATE_SCRIPT}" --action init 2>/dev/null || true
+            bash "${STATE_SCRIPT}" --action set-admin-dm --room-id "${DM_ROOM_ID}" 2>/dev/null || true
+            log "Admin DM room persisted to state.json: ${DM_ROOM_ID}"
+        fi
+    fi
+
+    # Schedule welcome message in background (only on first boot)
+    if [ -n "${DM_ROOM_ID}" ] && [ ! -f "/root/manager-workspace/soul-configured" ]; then
+        log "Scheduling welcome message (background, waiting for OpenClaw to start)..."
+        (
+            _HICLAW_LANGUAGE="${HICLAW_LANGUAGE:-zh}"
+            _HICLAW_TIMEZONE="${TZ:-Asia/Shanghai}"
+            _wait=0
+            _ready=false
+            while [ "${_wait}" -lt 300 ]; do
+                if curl -sf http://127.0.0.1:18799/ > /dev/null 2>&1; then
+                    _ready=true
+                    break
                 fi
-                _welcome_msg="This is an automated message from the HiClaw cloud deployment. This is a fresh installation.
+                sleep 3
+                _wait=$((_wait + 3))
+            done
+            if [ "${_ready}" != "true" ]; then
+                echo "[manager] WARNING: OpenClaw gateway not ready within 300s, skipping welcome message"
+                exit 0
+            fi
+            # Ensure Manager has joined the DM room before sending the welcome
+            # message.  Without this, there is a race between OpenClaw's Matrix
+            # auto-join and the message send — the message may land before Manager
+            # joins, so OpenClaw's /sync never picks it up.
+            _join_ok=false
+            for _join_attempt in 1 2 3; do
+                if curl -sf -X POST "${HICLAW_MATRIX_SERVER}/_matrix/client/v3/rooms/${DM_ROOM_ID}/join" \
+                    -H "Authorization: Bearer ${MANAGER_TOKEN}" \
+                    -H 'Content-Type: application/json' \
+                    -d '{}' > /dev/null 2>&1; then
+                    echo "[manager] Manager joined DM room before welcome message"
+                    _join_ok=true
+                    break
+                fi
+                sleep 2
+            done
+            if [ "${_join_ok}" != "true" ]; then
+                echo "[manager] WARNING: Manager join request failed after 3 attempts (may already be joined)"
+            fi
+            _welcome_msg="This is an automated message from the HiClaw setup. This is a fresh installation.
 
 --- Installation Context ---
 User Language: ${_HICLAW_LANGUAGE}  (zh = Chinese, en = English)
@@ -370,22 +429,21 @@ Please begin the onboarding conversation:
 7. Once confirmed, run: touch ~/soul-configured
 
 The human admin will start chatting shortly."
-                _txn_id="welcome-cloud-$(date +%s)"
-                _payload=$(jq -nc --arg body "${_welcome_msg}" '{"msgtype":"m.text","body":$body}')
-                _raw=$(curl -s -w '\nHTTP_CODE:%{http_code}' -X PUT "${HICLAW_MATRIX_SERVER}/_matrix/client/v3/rooms/${DM_ROOM_ID}/send/m.room.message/${_txn_id}" \
-                    -H "Authorization: Bearer ${ADMIN_MATRIX_TOKEN}" \
-                    -H 'Content-Type: application/json' \
-                    -d "${_payload}" 2>&1) || true
-                _http_code=$(echo "${_raw}" | tail -1 | sed 's/HTTP_CODE://')
-                _send_resp=$(echo "${_raw}" | sed '$d')
-                if echo "${_send_resp}" | jq -e '.event_id' > /dev/null 2>&1; then
-                    echo "[cloud-manager] Welcome message sent to DM room"
-                else
-                    echo "[cloud-manager] WARNING: Failed to send welcome message (HTTP ${_http_code}): ${_send_resp}"
-                fi
-            ) &
-            log "Welcome message background process started (PID: $!)"
-        fi
+            _txn_id="welcome-$(date +%s)"
+            _payload=$(jq -nc --arg body "${_welcome_msg}" '{"msgtype":"m.text","body":$body}')
+            _raw=$(curl -s -w '\nHTTP_CODE:%{http_code}' -X PUT "${HICLAW_MATRIX_SERVER}/_matrix/client/v3/rooms/${DM_ROOM_ID}/send/m.room.message/${_txn_id}" \
+                -H "Authorization: Bearer ${ADMIN_MATRIX_TOKEN}" \
+                -H 'Content-Type: application/json' \
+                -d "${_payload}" 2>&1) || true
+            _http_code=$(echo "${_raw}" | tail -1 | sed 's/HTTP_CODE://')
+            _send_resp=$(echo "${_raw}" | sed '$d')
+            if echo "${_send_resp}" | jq -e '.event_id' > /dev/null 2>&1; then
+                echo "[manager] Welcome message sent to DM room"
+            else
+                echo "[manager] WARNING: Failed to send welcome message (HTTP ${_http_code}): ${_send_resp}"
+            fi
+        ) &
+        log "Welcome message background process started (PID: $!)"
     fi
 fi
 
@@ -395,8 +453,6 @@ fi
 log "Generating Manager openclaw.json..."
 export MANAGER_MATRIX_TOKEN="${MANAGER_TOKEN}"
 export MANAGER_GATEWAY_KEY="${HICLAW_MANAGER_GATEWAY_KEY}"
-export MANAGER_HOOKS_TOKEN=$(echo -n "${HICLAW_MANAGER_GATEWAY_KEY}-hooks" | base64 -w 0)
-
 # Resolve model parameters based on model name
 MODEL_NAME="${HICLAW_DEFAULT_MODEL:-qwen3.5-plus}"
 case "${MODEL_NAME}" in
@@ -412,7 +468,7 @@ case "${MODEL_NAME}" in
         export MODEL_CONTEXT_WINDOW=200000 MODEL_MAX_TOKENS=64000 ;;
     deepseek-chat|deepseek-reasoner|kimi-k2.5)
         export MODEL_CONTEXT_WINDOW=256000 MODEL_MAX_TOKENS=128000 ;;
-    glm-5|MiniMax-M2.5)
+    glm-5|MiniMax-M2.7|MiniMax-M2.7-highspeed|MiniMax-M2.5)
         export MODEL_CONTEXT_WINDOW=200000 MODEL_MAX_TOKENS=128000 ;;
     *)
         export MODEL_CONTEXT_WINDOW=150000 MODEL_MAX_TOKENS=128000 ;;
@@ -456,6 +512,8 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
     jq --arg token "${MANAGER_TOKEN}" \
        --arg key "${HICLAW_MANAGER_GATEWAY_KEY}" \
        --arg model "${MODEL_NAME}" \
+       --arg emb_model "${HICLAW_EMBEDDING_MODEL}" \
+       --arg aigw_domain "${AI_GATEWAY_DOMAIN}" \
        --argjson e2ee "${MATRIX_E2EE_ENABLED}" \
        --argjson known_models "${KNOWN_MODELS}" \
        --argjson ctx "${MODEL_CONTEXT_WINDOW}" \
@@ -475,11 +533,14 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
         # Rebuild model aliases from the full models list
         | (.models.providers["hiclaw-gateway"].models | map({ ("hiclaw-gateway/" + .id): { "alias": .id } }) | add // {}) as $aliases
         | .agents.defaults.models = ((.agents.defaults.models // {}) + $aliases)
-        | .channels.matrix.accessToken = $token | .hooks.token = ($key + "-hooks" | @base64) | .models.providers["hiclaw-gateway"].apiKey = $key
+        | .channels.matrix.accessToken = $token | .models.providers["hiclaw-gateway"].apiKey = $key
+        | ((.hooks.token // "") as $ht | if $ht == $key or $ht == ($key + "-hooks" | @base64) then del(.hooks) else . end)
         | .agents.defaults.model.primary = ("hiclaw-gateway/" + $model)
         | .commands.restart = true
         | .gateway.controlUi.dangerouslyDisableDeviceAuth = true
         | .channels.matrix.encryption = $e2ee
+        # Ensure memorySearch config exists (embedding model for memory) — skip if embedding model is empty
+        | if $emb_model != "" then .agents.defaults.memorySearch //= {"provider":"openai","model":$emb_model,"remote":{"baseUrl":("http://" + $aigw_domain + ":8080/v1"),"apiKey":$key}} else . end
        ' \
        /root/manager-workspace/openclaw.json > /tmp/openclaw.json.tmp && \
         mv /tmp/openclaw.json.tmp /root/manager-workspace/openclaw.json
@@ -493,18 +554,29 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
 else
     log "Manager openclaw.json not found, generating from template..."
     envsubst < /opt/hiclaw/configs/manager-openclaw.json.tmpl > /root/manager-workspace/openclaw.json
-    # Inject custom model if not in the built-in list
+    # Post-envsubst injection: memorySearch + custom model (single jq pass when possible)
     if ! jq -e --arg model "${MODEL_NAME}" '.models.providers["hiclaw-gateway"].models | map(.id) | index($model)' /root/manager-workspace/openclaw.json > /dev/null 2>&1; then
         log "Custom model '${MODEL_NAME}' not in built-in list, injecting into config..."
-        jq --arg model "${MODEL_NAME}" \
+        jq --arg emb_model "${HICLAW_EMBEDDING_MODEL}" \
+           --arg aigw_domain "${AI_GATEWAY_DOMAIN}" \
+           --arg key "${HICLAW_MANAGER_GATEWAY_KEY}" \
+           --arg model "${MODEL_NAME}" \
            --argjson ctx "${MODEL_CONTEXT_WINDOW}" \
            --argjson max "${MODEL_MAX_TOKENS}" \
            --argjson reasoning "${MODEL_REASONING}" \
            --argjson input "${MODEL_INPUT}" \
            '
-            .models.providers["hiclaw-gateway"].models += [{"id": $model, "name": $model, "reasoning": $reasoning, "contextWindow": $ctx, "maxTokens": $max, "input": $input}]
+            (if $emb_model != "" then .agents.defaults.memorySearch = {"provider":"openai","model":$emb_model,"remote":{"baseUrl":("http://" + $aigw_domain + ":8080/v1"),"apiKey":$key}} else . end)
+            | .models.providers["hiclaw-gateway"].models += [{"id": $model, "name": $model, "reasoning": $reasoning, "contextWindow": $ctx, "maxTokens": $max, "input": $input}]
             | .agents.defaults.models += {("hiclaw-gateway/" + $model): {"alias": $model}}
            ' /root/manager-workspace/openclaw.json > /tmp/openclaw.json.tmp && \
+            mv /tmp/openclaw.json.tmp /root/manager-workspace/openclaw.json
+    elif [ -n "${HICLAW_EMBEDDING_MODEL}" ]; then
+        jq --arg emb_model "${HICLAW_EMBEDDING_MODEL}" \
+           --arg aigw_domain "${AI_GATEWAY_DOMAIN}" \
+           --arg key "${HICLAW_MANAGER_GATEWAY_KEY}" \
+           '.agents.defaults.memorySearch = {"provider":"openai","model":$emb_model,"remote":{"baseUrl":("http://" + $aigw_domain + ":8080/v1"),"apiKey":$key}}' \
+           /root/manager-workspace/openclaw.json > /tmp/openclaw.json.tmp && \
             mv /tmp/openclaw.json.tmp /root/manager-workspace/openclaw.json
     fi
     _written_token=$(jq -r '.channels.matrix.accessToken' /root/manager-workspace/openclaw.json 2>/dev/null)
@@ -520,11 +592,126 @@ if [ "${HICLAW_RUNTIME}" = "aliyun" ]; then
        '.channels.matrix.homeserver = $homeserver
         | .models.providers["hiclaw-gateway"].baseUrl = $gateway
         | .models.providers["hiclaw-gateway"].apiKey = $key
-        | .hooks.token = ($key + "-hooks" | @base64)
-        | .commands.restart = false' \
+        | ((.hooks.token // "") as $ht | if $ht == $key or $ht == ($key + "-hooks" | @base64) then del(.hooks) else . end)
+        | .commands.restart = false
+        | if .agents.defaults.memorySearch then .agents.defaults.memorySearch.remote.baseUrl = $gateway | .agents.defaults.memorySearch.remote.apiKey = $key else . end' \
        /root/manager-workspace/openclaw.json > /tmp/openclaw-cloud.json && \
         mv /tmp/openclaw-cloud.json /root/manager-workspace/openclaw.json
     log "Cloud overlay applied"
+fi
+
+# ============================================================
+# Optional: enable openclaw-cms-plugin observability
+# Config is applied at runtime so secrets stay out of image layers.
+# ============================================================
+CMS_TRACES_ENABLED="$(echo "${HICLAW_CMS_TRACES_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')"
+if [ "${CMS_TRACES_ENABLED}" = "true" ]; then
+    CMS_PLUGIN_NAME="openclaw-cms-plugin"
+    CMS_PLUGIN_DIR="${OPENCLAW_CMS_PLUGIN_DIR:-/opt/openclaw/extensions/openclaw-cms-plugin}"
+    CMS_PLUGIN_MANIFEST="${CMS_PLUGIN_DIR}/openclaw.plugin.json"
+    DIAG_PLUGIN_NAME="diagnostics-otel"
+    DIAG_PLUGIN_DIR="/opt/openclaw/extensions/diagnostics-otel"
+    CMS_LICENSE_KEY="${HICLAW_CMS_LICENSE_KEY:-}"
+    CMS_PROJECT="${HICLAW_CMS_PROJECT:-}"
+    CMS_METRICS_ENABLED="${HICLAW_CMS_METRICS_ENABLED:-false}"
+
+    if [ ! -f "${CMS_PLUGIN_MANIFEST}" ]; then
+        log "WARNING: ${CMS_PLUGIN_NAME} manifest not found at ${CMS_PLUGIN_MANIFEST}, skipping plugin config"
+    else
+        _missing=0
+        [ -z "${HICLAW_CMS_ENDPOINT:-}" ] && log "WARNING: HICLAW_CMS_ENDPOINT is required when HICLAW_CMS_TRACES_ENABLED=true" && _missing=1
+        [ -z "${CMS_LICENSE_KEY:-}" ] && log "WARNING: HICLAW_CMS_LICENSE_KEY is required when HICLAW_CMS_TRACES_ENABLED=true" && _missing=1
+        [ -z "${HICLAW_CMS_WORKSPACE:-}" ] && log "WARNING: HICLAW_CMS_WORKSPACE is required when HICLAW_CMS_TRACES_ENABLED=true" && _missing=1
+
+        if [ "${_missing}" = "0" ]; then
+            CMS_SERVICE_NAME="${HICLAW_CMS_SERVICE_NAME:-hiclaw-manager}"
+            CMS_ENABLE_METRICS="${CMS_METRICS_ENABLED}"
+            DIAG_AVAILABLE="0"
+            _metrics_lc="$(echo "${CMS_ENABLE_METRICS}" | tr '[:upper:]' '[:lower:]')"
+            if [ "${_metrics_lc}" = "true" ]; then
+                if [ -f "${DIAG_PLUGIN_DIR}/package.json" ]; then
+                    DIAG_AVAILABLE="1"
+                    if [ ! -d "${DIAG_PLUGIN_DIR}/node_modules" ]; then
+                        log "diagnostics-otel dependencies missing, installing..."
+                        if (cd "${DIAG_PLUGIN_DIR}" && npm install --omit=dev --ignore-scripts >/tmp/hiclaw-diag-install.log 2>&1); then
+                            log "diagnostics-otel dependencies installed"
+                        else
+                            log "WARNING: diagnostics-otel npm install failed, metrics plugin may not load"
+                        fi
+                    else
+                        log "diagnostics-otel dependencies already present"
+                    fi
+                else
+                    log "WARNING: diagnostics-otel package.json not found at ${DIAG_PLUGIN_DIR}, metrics plugin may not load"
+                fi
+            fi
+
+            log "Applying ${CMS_PLUGIN_NAME} config to openclaw.json..."
+            jq --arg pluginName "${CMS_PLUGIN_NAME}" \
+               --arg pluginDir "${CMS_PLUGIN_DIR}" \
+               --arg endpoint "${HICLAW_CMS_ENDPOINT}" \
+               --arg licenseKey "${CMS_LICENSE_KEY}" \
+               --arg armsProject "${CMS_PROJECT}" \
+               --arg cmsWorkspace "${HICLAW_CMS_WORKSPACE}" \
+               --arg serviceName "${CMS_SERVICE_NAME}" \
+               --arg diagPluginName "${DIAG_PLUGIN_NAME}" \
+               --arg diagPluginDir "${DIAG_PLUGIN_DIR}" \
+               --arg metricsRaw "${CMS_ENABLE_METRICS}" \
+               --arg diagAvailableRaw "${DIAG_AVAILABLE}" \
+               '
+                .plugins = (.plugins // {})
+                | .plugins.load = (.plugins.load // {})
+                | .plugins.entries = (.plugins.entries // {})
+                | if (.plugins.allow | type) != "array" then .plugins.allow = [] else . end
+                | if (.plugins.allow | index($pluginName)) == null then .plugins.allow += [$pluginName] else . end
+                | if (.plugins.load.paths | type) != "array" then .plugins.load.paths = [] else . end
+                | if (.plugins.load.paths | index($pluginDir)) == null then .plugins.load.paths += [$pluginDir] else . end
+                | .plugins.entries[$pluginName] = {
+                    "enabled": true,
+                    "config": {
+                        "endpoint": $endpoint,
+                        "headers": {
+                            "x-arms-license-key": $licenseKey,
+                            "x-arms-project": $armsProject,
+                            "x-cms-workspace": $cmsWorkspace
+                        },
+                        "serviceName": $serviceName
+                    }
+                }
+
+                # diagnostics-otel metrics (optional)
+                | ($metricsRaw | ascii_downcase) as $m
+                | ($diagAvailableRaw == "1") as $diagAvailable
+                | (($m == "true") and $diagAvailable) as $metricsEnabled
+                | if $metricsEnabled then
+                    (if (.plugins.allow | index($diagPluginName)) == null then .plugins.allow += [$diagPluginName] else . end)
+                    | (if (.plugins.load.paths | index($diagPluginDir)) == null then .plugins.load.paths += [$diagPluginDir] else . end)
+                    | .plugins.entries[$diagPluginName].enabled = true
+                    | .diagnostics = (.diagnostics // {})
+                    | .diagnostics.otel = (.diagnostics.otel // {})
+                    | .diagnostics.enabled = true
+                    | .diagnostics.otel.enabled = true
+                    | .diagnostics.otel.endpoint = $endpoint
+                    | .diagnostics.otel.protocol = (.diagnostics.otel.protocol // "http/protobuf")
+                    | .diagnostics.otel.headers = {
+                        "x-arms-license-key": $licenseKey,
+                        "x-arms-project": $armsProject,
+                        "x-cms-workspace": $cmsWorkspace
+                    }
+                    | .diagnostics.otel.serviceName = $serviceName
+                    | .diagnostics.otel.metrics = true
+                    | .diagnostics.otel.traces = (.diagnostics.otel.traces // false)
+                    | .diagnostics.otel.logs = (.diagnostics.otel.logs // false)
+                  else
+                    .
+                  end
+               ' /root/manager-workspace/openclaw.json > /tmp/openclaw-cms.json && \
+                mv /tmp/openclaw-cms.json /root/manager-workspace/openclaw.json
+            log "${CMS_PLUGIN_NAME} config applied (metrics=${CMS_ENABLE_METRICS}, service=${CMS_SERVICE_NAME})"
+        else
+            log "Skipping ${CMS_PLUGIN_NAME} config due to missing required env vars"
+        fi
+    fi
 fi
 
 # ============================================================
@@ -611,12 +798,12 @@ fi
 
 # ============================================================
 # Recreate Worker containers as needed after Manager restart.
-# Manager IP may change on restart; Workers use ExtraHosts pointing to Manager IP,
-# so any worker whose ExtraHosts IP no longer matches must be recreated.
+# Workers are on hiclaw-net; Docker DNS resolves *-local.hiclaw.io via
+# the Manager's network aliases, so IP changes don't require worker recreation.
+# Only recreate stopped/missing workers.
 # ============================================================
 if container_api_available; then
     REGISTRY_FILE="/root/manager-workspace/workers-registry.json"
-    _manager_ip=$(container_get_manager_ip)
     if [ -f "${REGISTRY_FILE}" ]; then
         for _worker_name in $(jq -r '.workers | keys[]' "${REGISTRY_FILE}" 2>/dev/null); do
             [ -z "${_worker_name}" ] && continue
@@ -630,24 +817,11 @@ if container_api_available; then
 
             _status=$(container_status_worker "${_worker_name}")
             if [ "${_status}" = "running" ]; then
-                # Check if ExtraHosts IP still matches current Manager IP.
-                # If ExtraHosts is empty the worker uses real DNS — no recreate needed.
-                _inspect=$(_api GET "/containers/${WORKER_CONTAINER_PREFIX}${_worker_name}/json" 2>/dev/null)
-                _extra_hosts_len=$(echo "${_inspect}" | jq -r '.HostConfig.ExtraHosts | length' 2>/dev/null)
-                if [ -z "${_extra_hosts_len}" ] || [ "${_extra_hosts_len}" = "0" ]; then
-                    log "Worker running (no ExtraHosts, real DNS): ${_worker_name}, skipping"
-                    continue
-                fi
-                _worker_ip=$(echo "${_inspect}" | jq -r '.HostConfig.ExtraHosts[0]' 2>/dev/null | cut -d: -f2)
-                if [ "${_worker_ip}" = "${_manager_ip}" ]; then
-                    log "Worker running with current Manager IP (${_manager_ip}): ${_worker_name}, skipping"
-                    continue
-                fi
-                log "Worker running but Manager IP changed (${_worker_ip} -> ${_manager_ip}): ${_worker_name}, recreating..."
-            else
-                # Container missing or stopped — always recreate.
-                log "Worker container ${_status}: ${_worker_name}, recreating..."
+                log "Worker running: ${_worker_name}, skipping"
+                continue
             fi
+            # Container missing or stopped — recreate.
+            log "Worker container ${_status}: ${_worker_name}, recreating..."
             _creds_file="/data/worker-creds/${_worker_name}.env"
             if [ -f "${_creds_file}" ]; then
                 source "${_creds_file}"
@@ -731,16 +905,12 @@ if [ -f /root/manager-workspace/.upgrade-pending-worker-notify ]; then
 fi
 
 # ============================================================
-# Start OpenClaw Manager Agent
+# Start Manager Agent
 # ============================================================
-log "Starting Manager Agent (OpenClaw)..."
+log "Starting Manager Agent (${MANAGER_RUNTIME})..."
 
 # HOME is already set to /root/manager-workspace via docker run -e HOME=...
-export OPENCLAW_CONFIG_PATH="/root/manager-workspace/openclaw.json"
-
-# Symlink to default OpenClaw config path so CLI commands find the config
-mkdir -p "${HOME}/.openclaw"
-ln -sf "/root/manager-workspace/openclaw.json" "${HOME}/.openclaw/openclaw.json"
+cd "${HOME}"
 
 # Ensure host credential symlinks exist under HOME
 if [ -d "/host-share" ]; then
@@ -748,17 +918,6 @@ if [ -d "/host-share" ]; then
 fi
 
 log "HOME=${HOME} (manager-workspace, host-mounted)"
-cd "${HOME}"
-
-# Clean orphaned session write locks (e.g. from SIGKILL or crash before exit handlers)
-# Prevents "session file locked (timeout 10000ms)" when PID was reused
-find "${HOME}/.openclaw/agents" -name "*.jsonl.lock" -delete 2>/dev/null || true
-log "Cleaned up any orphaned session write locks"
-
-# Clean Matrix crypto storage (SQLite WAL may be corrupted after unclean shutdown)
-# Crypto state is re-negotiated on startup; losing it only means re-establishing E2EE sessions
-rm -rf "${HOME}/.openclaw/matrix" 2>/dev/null || true
-log "Cleaned Matrix crypto storage (will re-establish E2EE sessions)"
 
 # ── Render agent doc templates ────────────────────────────────────────────
 # Replace ${VAR} placeholders with actual values so the AI agent reads
@@ -814,5 +973,53 @@ if [ "${HICLAW_RUNTIME}" = "aliyun" ]; then
     log "OSS→Local sync started (every 5m, PID: $!)"
 fi
 
-# Launch OpenClaw
-exec openclaw gateway run --verbose --force
+# ============================================================
+# Auto-generate Manager mcporter config for pre-configured MCP servers
+# If HICLAW_GITHUB_TOKEN was set at install time, setup-higress.sh already
+# configured GitHub MCP on Higress. Run setup-mcp-server.sh now so that
+# config/mcporter.json exists when the Agent starts — no need to ask user for PAT.
+# ============================================================
+if [ -n "${HICLAW_GITHUB_TOKEN}" ] && [ "${HICLAW_RUNTIME}" != "aliyun" ]; then
+    if [ ! -f "${HOME}/config/mcporter.json" ]; then
+        log "Auto-generating Manager mcporter config for GitHub MCP (HICLAW_GITHUB_TOKEN set)..."
+        bash /opt/hiclaw/agent/skills/mcp-server-management/scripts/setup-mcp-server.sh \
+            github "${HICLAW_GITHUB_TOKEN}" 2>&1 | while IFS= read -r line; do log "  [setup-mcp] ${line}"; done || \
+            log "WARNING: setup-mcp-server.sh failed — Agent may need to configure GitHub MCP manually"
+    else
+        log "Manager mcporter config already exists, skipping auto-generate"
+    fi
+fi
+
+# ============================================================
+# Runtime-specific startup
+# ============================================================
+if [ "${MANAGER_RUNTIME}" = "copaw" ]; then
+    # Delegate to CoPaw startup script
+    exec /opt/hiclaw/scripts/init/start-copaw-manager.sh
+else
+    # ── OpenClaw Runtime ─────────────────────────────────────────────────────
+    log "Starting OpenClaw Manager..."
+
+    export OPENCLAW_CONFIG_PATH="/root/manager-workspace/openclaw.json"
+
+    # Symlink to default OpenClaw config path so CLI commands find the config
+    mkdir -p "${HOME}/.openclaw"
+    ln -sf "/root/manager-workspace/openclaw.json" "${HOME}/.openclaw/openclaw.json"
+
+    # Clean orphaned session write locks (e.g. from SIGKILL or crash before exit handlers)
+    # Prevents "session file locked (timeout 10000ms)" when PID was reused
+    find "${HOME}/.openclaw/agents" -name "*.jsonl.lock" -delete 2>/dev/null || true
+    log "Cleaned up any orphaned session write locks"
+
+    # Clean Matrix crypto storage (SQLite WAL may be corrupted after unclean shutdown)
+    # Crypto state is re-negotiated on startup; losing it only means re-establishing E2EE sessions
+    rm -rf "${HOME}/.openclaw/matrix" 2>/dev/null || true
+    log "Cleaned Matrix crypto storage (will re-establish E2EE sessions)"
+
+    # Launch OpenClaw
+    # Disable full-process respawn so the CLI uses its internal restart loop.
+    # Without this, config reload spawns a detached child and exits, then
+    # supervisord restarts the CLI — resulting in two gateway processes.
+    export OPENCLAW_NO_RESPAWN=1
+    exec openclaw gateway run --verbose --force
+fi

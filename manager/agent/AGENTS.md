@@ -33,8 +33,16 @@ Don't ask permission. Just do it.
 
 YOLO mode check: `HICLAW_YOLO=1` env var or `~/yolo-mode` file exists. In YOLO mode, the admin has delegated full authority to you and is unavailable — you cannot reach them for confirmation. Any attempt to ask for confirmation will stall the workflow indefinitely. Make every decision yourself: create Workers, assign tasks, confirm projects, skip missing credentials, and proceed without pause.
 
+## MinIO Storage
+
+- **Local mirror:** `/root/hiclaw-fs/` — your local filesystem, NOT automatically synced
+- **MinIO prefix:** always use `${HICLAW_STORAGE_PREFIX}` in mc commands (this env var is pre-set in your shell, format: `<mc-alias>/<bucket>`)
+- **Example:** `mc mirror ${HICLAW_STORAGE_PREFIX}/shared/tasks/{task-id}/ /root/hiclaw-fs/shared/tasks/{task-id}/ --overwrite`
+- **NEVER guess or hardcode the prefix** — do NOT use `hiclaw-fs/...`, `hiclaw-storage/...`, or any literal path. Always use `${HICLAW_STORAGE_PREFIX}`. If unsure, run `echo $HICLAW_STORAGE_PREFIX` to check.
+
 ## Gotchas
 
+- **Create multiple Workers in parallel** — when you need 2+ Workers, run all `create-worker.sh` calls concurrently (e.g. via the `exec` tool's background mode or sequential-but-non-blocking invocations). Each creation takes ~45s; sequential creation of 3 Workers wastes ~90s. The scripts are independent and safe to run in parallel.
 - **@mention must use full Matrix ID** (with domain, e.g. `@alice:matrix-local.hiclaw.io:18080`) — writing "alice" or "@alice" without domain will NOT wake the Worker
 - **History context: only act on the Current message section** — do not @mention anyone based on the history section's senders
 - **Phase handoff requires immediate @mention** — just describing "bob will handle phase 2" without actually sending `@bob:...` stalls the workflow permanently
@@ -47,6 +55,7 @@ YOLO mode check: `HICLAW_YOLO=1` env var or `~/yolo-mode` file exists. In YOLO m
 - **Peer mentions default off** — only Manager/Admin can @mention Workers. To enable inter-worker mentions, see worker-management skill's peer-mentions reference
 - **Identity and permissions** — sender identification and trusted contact rules are in the channel-management skill
 - **Worker reports completion → load task-management skill and execute full flow** — do NOT just acknowledge in chat. You MUST: (1) pull task directory from MinIO, (2) read result, (3) update meta.json + state.json, (4) write memory, (5) notify admin. Skipping any step leaves stale state and missing results.
+- **Every task delegated to a Worker MUST be registered in state.json** — no exceptions for "simple", "coordination", or "non-coding" tasks. Unregistered tasks cause the Worker to be auto-stopped mid-work by idle timeout.
 - **Push to MinIO BEFORE notifying Worker** — Worker cannot file-sync until files exist in MinIO. Always verify `mc cp` succeeds before sending @mention. If you notify first, Worker gets an empty sync.
 - **After re-syncing files for a Worker, always @mention them** — if a Worker reports they can't find files and you push/re-push to MinIO, you MUST @mention the Worker telling them to file-sync again. Without the @mention, the Worker never knows the files are ready.
 - **Always notify admin in DM after task/project milestones** — don't only reply in Worker/Project rooms; admin expects status updates in DM too

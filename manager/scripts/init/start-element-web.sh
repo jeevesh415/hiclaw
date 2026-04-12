@@ -25,18 +25,22 @@ sed -i 's/^worker_processes [0-9]*;/worker_processes 2;/' /etc/nginx/nginx.conf 
 grep -q '^worker_processes' /etc/nginx/nginx.conf || \
 sed -i '1i worker_processes 2;' /etc/nginx/nginx.conf
 
+# Create browser bypass script as external JS file (allowed by CSP script-src 'self')
+# This avoids adding 'unsafe-inline' to CSP, preserving XSS protection
+echo 'window.localStorage.setItem("mx_accepts_unsupported_browser","true");' > /opt/element-web/browser-bypass.js
+
 # Generate Nginx config for Element Web
-# Note: We inject a script to automatically accept unsupported browsers
-# This bypasses the browser compatibility check in Element Web's SupportedBrowser.ts
+# Note: We inject an external script tag to automatically accept unsupported browsers
+# This bypasses the browser version check in Element Web's SupportedBrowser.ts
 cat > /etc/nginx/conf.d/element-web.conf << 'NGINX'
 server {
     listen 8088;
     root /opt/element-web;
     index index.html;
 
-    # Inject script to bypass browser compatibility check
-    # Sets localStorage.mx_accepts_unsupported_browser = true before app loads
-    sub_filter '</head>' '<script>window.localStorage.setItem("mx_accepts_unsupported_browser","true");</script></head>';
+    # Inject external script to bypass browser compatibility check
+    # Uses external JS file instead of inline script to comply with CSP (script-src 'self')
+    sub_filter '</head>' '<script src="browser-bypass.js"></script></head>';
     sub_filter_once on;
     sub_filter_types text/html;
 
@@ -50,15 +54,18 @@ server {
 }
 NGINX
 
-# Generate Nginx config for OpenClaw Console reverse proxy.
+# Generate Nginx config for Manager Console reverse proxy.
+# OpenClaw runtime: injects gateway token via inline script for auto-login.
+# CoPaw runtime: plain reverse proxy, no token injection needed.
+if [ "${HICLAW_MANAGER_RUNTIME:-openclaw}" = "openclaw" ]; then
+    OPENCLAW_TOKEN="${HICLAW_MANAGER_GATEWAY_KEY:-}"
+    cat > /etc/nginx/conf.d/manager-console.conf << NGINX
+# Manager Console (OpenClaw) — reverse proxy to gateway loopback with auto-token injection
 # Injects the gateway token via inline script that sets location.hash with #token=...
 # This is the only reliable method across all openclaw versions — the Control UI
 # reads the token from the URL hash on load (both old and new versions support this).
 # CSP must be stripped to allow the inline script, and proxy headers (Host, X-Real-IP)
 # are omitted to avoid triggering untrusted-proxy detection in the gateway.
-OPENCLAW_TOKEN="${HICLAW_MANAGER_GATEWAY_KEY:-}"
-cat > /etc/nginx/conf.d/openclaw-console.conf << NGINX
-# OpenClaw Console — reverse proxy to gateway loopback with auto-token injection
 server {
     listen 18888;
 
@@ -82,6 +89,23 @@ server {
     }
 }
 NGINX
+else
+    cat > /etc/nginx/conf.d/manager-console.conf << 'NGINX'
+# Manager Console (CoPaw) — plain reverse proxy to CoPaw app
+server {
+    listen 18888;
+
+    location / {
+        proxy_pass http://127.0.0.1:18799;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+NGINX
+fi
 
 # Remove default nginx site if exists
 rm -f /etc/nginx/sites-enabled/default
