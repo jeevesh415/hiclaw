@@ -3,13 +3,15 @@
 # ============================================================
 # Produces: /hiclaw-controller, /hiclaw, /kube-apiserver, /opt/hiclaw/config/crd/
 # Manager Dockerfile copies these artifacts via: COPY --from=hiclaw-controller ...
+#
+# Since v0.2: includes merged worker lifecycle, auth, credentials, and proxy.
 
 ARG HIGRESS_REGISTRY=higress-registry.cn-hangzhou.cr.aliyuncs.com
 
 # ============ Stage 1: Build Go binaries ============
-FROM ${HIGRESS_REGISTRY}/higress/golang:1.23-alpine AS builder
+FROM ${HIGRESS_REGISTRY}/higress/golang:1.25-alpine AS builder
 
-ARG GOPROXY=https://proxy.golang.org,direct
+ARG GOPROXY=https://goproxy.cn,direct
 ENV GOPROXY=${GOPROXY}
 RUN apk add --no-cache gcc musl-dev
 
@@ -33,7 +35,9 @@ RUN apk add --no-cache curl && \
 # ============ Final: Minimal image with all artifacts ============
 FROM ${HIGRESS_REGISTRY}/higress/alpine:3.20
 
-RUN apk add --no-cache bash jq curl unzip
+RUN apk add --no-cache bash jq curl unzip && \
+    curl -fSL -o /usr/local/bin/mc https://dl.min.io/client/mc/release/linux-amd64/mc && \
+    chmod +x /usr/local/bin/mc
 
 COPY --from=builder /hiclaw-controller /usr/local/bin/hiclaw-controller
 COPY --from=builder /hiclaw /usr/local/bin/hiclaw

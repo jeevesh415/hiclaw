@@ -40,3 +40,11 @@ node_modules/
 package.json
 pnpm-lock.yaml
 .cursor/
+
+# Claude Code
+CLAUDE.md
+
+
+# Compiled binaries
+hiclaw-controller/controller
+hiclaw-controller/hiclaw
