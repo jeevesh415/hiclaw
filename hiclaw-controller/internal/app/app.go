@@ -122,6 +122,7 @@ func (a *App) Start(ctx context.Context) error {
 				AdminPassword:  a.cfg.MatrixAdminPassword,
 				Namespace:      a.namespace,
 				IsEmbedded:     a.cfg.KubeMode == "embedded",
+			AgentFSDir:     a.cfg.AgentFSDir(),
 				LLMProvider:    a.cfg.LLMProvider,
 				LLMAPIKey:      a.cfg.LLMAPIKey,
 				OpenAIBaseURL:  a.cfg.OpenAIBaseURL,
@@ -223,16 +224,18 @@ func (a *App) initServiceLayer(_ context.Context) error {
 	}
 
 	a.provisioner = service.NewProvisioner(service.ProvisionerConfig{
-		Matrix:       a.matrix,
-		Gateway:      a.gateway,
-		OSSAdmin:     a.ossAdmin,
-		Creds:        credStore,
-		K8sClient:    a.k8sClient,
-		KubeMode:     cfg.KubeMode,
-		Namespace:    a.namespace,
-		AuthAudience: cfg.AuthAudience,
-		MatrixDomain: cfg.MatrixDomain,
-		AdminUser:    cfg.MatrixAdminUser,
+		Matrix:            a.matrix,
+		Gateway:           a.gateway,
+		OSSAdmin:          a.ossAdmin,
+		Creds:             credStore,
+		K8sClient:         a.k8sClient,
+		KubeMode:          cfg.KubeMode,
+		Namespace:         a.namespace,
+		AuthAudience:      cfg.AuthAudience,
+		MatrixDomain:      cfg.MatrixDomain,
+		AdminUser:         cfg.MatrixAdminUser,
+		ManagerPassword:   cfg.ManagerPassword,
+		ManagerGatewayKey: cfg.ManagerGatewayKey,
 	})
 
 	a.envBuilder = service.NewWorkerEnvBuilder(cfg.WorkerEnv)
@@ -299,9 +302,10 @@ func (a *App) initReconcilers(_ context.Context) error {
 	}
 	if a.cfg.KubeMode == "embedded" {
 		mgrReconciler.EmbeddedConfig = &controller.ManagerEmbeddedConfig{
-			WorkspaceDir: a.cfg.ManagerWorkspaceDir,
-			HostShareDir: a.cfg.HostShareDir,
-			ExtraEnv:     a.cfg.ManagerAgentEnv(),
+			WorkspaceDir:       a.cfg.ManagerWorkspaceDir,
+			HostShareDir:       a.cfg.HostShareDir,
+			ExtraEnv:           a.cfg.ManagerAgentEnv(),
+			ManagerConsolePort: a.cfg.ManagerConsolePort,
 		}
 	}
 	if err := mgrReconciler.SetupWithManager(a.mgr); err != nil {
@@ -404,7 +408,7 @@ func (a *App) startInCluster() (*rest.Config, error) {
 // =========================================================================
 
 func buildCloudCredentials(cfg *config.Config) backend.CloudCredentialProvider {
-	if cfg.SAEWorkerImage != "" || cfg.GWGatewayID != "" || cfg.OIDCTokenFile != "" || cfg.OSSBucket != "" {
+	if cfg.GWGatewayID != "" || cfg.OIDCTokenFile != "" || cfg.OSSBucket != "" {
 		return backend.NewDefaultCloudCredentialProvider()
 	}
 	return nil
@@ -431,17 +435,6 @@ func buildBackends(cfg *config.Config, cloudCreds backend.CloudCredentialProvide
 			log.Printf("[WARN] Failed to create K8s backend: %v", err)
 		} else {
 			workers = append(workers, k8s)
-		}
-	case "sae":
-		if cfg.SAEWorkerImage == "" || cloudCreds == nil {
-			log.Printf("[WARN] SAE backend requested but config incomplete")
-		} else {
-			sae, err := backend.NewSAEBackend(cloudCreds, cfg.SAEConfig(), cfg.ContainerPrefix)
-			if err != nil {
-				log.Printf("[WARN] Failed to create SAE backend: %v", err)
-			} else {
-				workers = append(workers, sae)
-			}
 		}
 	}
 
